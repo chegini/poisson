@@ -22,7 +22,7 @@ bddc: bddc.o $(KASKADE7)/libs/*.o $(KASKADE7)/libs/*.a
 	$(BLASLIB) $(FTNLIB) $(NUMALIB) $(LINKFLAGS) $(DEBUGFLAGS) -o $@
 
 bddc-add: bddc-add.o $(KASKADE7)/libs/*.a
-	$(CXX) $< $(KASKADELIB) $(DUNELIB) $(UGLIB) $(BOOSTLIB) $(DIRECTSOLVERLIB) \
+	$(CXX) $< $(KASKADE7)/libs/umfpack_solve.o $(KASKADELIB) $(DUNELIB) $(UGLIB) $(BOOSTLIB) $(DIRECTSOLVERLIB) \
 	$(BLASLIB) $(FTNLIB) $(NUMALIB) $(LINKFLAGS) $(DEBUGFLAGS) -o $@
 
 

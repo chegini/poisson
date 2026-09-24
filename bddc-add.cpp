@@ -269,7 +269,7 @@ int main(int argc, char** argv)
 
   int iter, interfaceTypes, n, m, threads, refinements;
   bool symmetricGrid, timing, vtk;
-  double decompTol;
+  double decompTol, tolerance;
   std::string prefix;
   if (getKaskadeOptions(argc,argv,Options
   ("refine", refinements,           6,"uniform mesh refinements")
@@ -280,6 +280,7 @@ int main(int argc, char** argv)
   ("subres",        n,              2,"number of subdomains")
   ("elmres",        m,              2,"unidirectional element number")
   ("iter",      iter,              16,"number of BDDC iterations")
+  ("tol",       tolerance,       1e-10,"BDDC residual tolerance")
   ("crisscross", symmetricGrid,  true,"meshing with criss-cross grid")
   ("interfacetypes",interfaceTypes, 7,"bit flags for coarse interfaces to include: 1 corner 2 edge 3 face")
   ("decompTol",   decompTol,   1000.0,"threshold for relative weak diagonal dominance violation / eps")
@@ -399,6 +400,9 @@ int main(int argc, char** argv)
       u -= component<0>(uDirect); u *= -1;
       writeVTK(u,prefix+"/err-"+paddedString(k),IoOptions(),"err");
     }
+
+    if (resNorm.back() <= tolerance)
+      break;
   }
 
   timer.stop("BDDC");
@@ -406,9 +410,20 @@ int main(int argc, char** argv)
 
 
 
-  int lookback = std::min(10,iter-1);
-  double contraction = std::pow(resNorm.back()/resNorm[resNorm.size()-lookback],1.0/lookback);
-  std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
+  if (resNorm.size() >= 2)
+  {
+    int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
+    double older = resNorm[resNorm.size()-lookback-1];
+    if (older > 0)
+    {
+      double contraction = std::pow(resNorm.back()/older,1.0/lookback);
+      std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
+    }
+    else
+      std::cout << "Contraction factor unavailable: reference residual is zero.\n";
+  }
+  else
+    std::cout << "Contraction factor unavailable: fewer than two iterations.\n";
 
 
 

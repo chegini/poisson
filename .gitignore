@@ -5,3 +5,4 @@ bddc-add
 gccerr.txt
 *.vtu
 *.pvtu
+*.gnu

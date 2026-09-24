@@ -336,7 +336,7 @@ int main(int argc, char** argv)
 
   int iter, interfaceTypes, n, m, threads;
   bool symmetricGrid, timing, vtk;
-  double sigma;
+  double sigma, tolerance;
   std::string prefix;
   if (getKaskadeOptions(argc,argv,Options
   ("prefix",      prefix,         ".","output path for vtu files")
@@ -346,6 +346,7 @@ int main(int argc, char** argv)
   ("subres",        n,              2,"unidirectional subdomain number")
   ("elmres",        m,              2,"unidirectional element number per subdomain")
   ("iter",      iter,              16,"number of BDDC iterations")
+  ("tol",       tolerance,       1e-10,"BDDC residual tolerance")
   ("crisscross", symmetricGrid,  true,"meshing with criss-cross grid")
   ("interfacetypes",interfaceTypes, 7,"bit flags for coarse interfaces to include: 1 corner 2 edge 4 face")
   ("sigma",      sigma,        1.0,   "diffusion constant to be used in top right corner [0.5,1]^2")
@@ -478,14 +479,28 @@ int main(int argc, char** argv)
       writeParallelVTK(outfileRestricted,filesRestricted,
                        std::vector<std::tuple<std::string,std::string,int>>{{"Float64","sol",1}});
     }
+
+    if (resNorm.back() <= tolerance)
+      break;
   }
 
   timer.stop("BDDC");
 
 
-  int lookback = std::min(10,iter-1);
-  double contraction = std::pow(resNorm.back()/resNorm[resNorm.size()-lookback],1.0/lookback);
-  std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
+  if (resNorm.size() >= 2)
+  {
+    int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
+    double older = resNorm[resNorm.size()-lookback-1];
+    if (older > 0)
+    {
+      double contraction = std::pow(resNorm.back()/older,1.0/lookback);
+      std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
+    }
+    else
+      std::cout << "Contraction factor unavailable: reference residual is zero.\n";
+  }
+  else
+    std::cout << "Contraction factor unavailable: fewer than two iterations.\n";
 
   auto [nIter, nTransfer, iB, rB, pB, cB] = bddcSolver.traffic();
   std::cout << "average amount of data exchanged per iteration: init=" << iB/(nIter*1024.0) << "kb "
