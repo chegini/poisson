@@ -1,0 +1,7 @@
+bddc
+bddc-add
+*.o
+*.d
+gccerr.txt
+*.vtu
+*.pvtu
