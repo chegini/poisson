@@ -1,7 +1,15 @@
-KASKADE7 := /kaskade7
+KASKADE7 ?= /kaskade7
+MPI ?= 1
+MPICXX ?= mpicxx
 
 include $(KASKADE7)/Makefile.Local
 include $(KASKADE7)/Makefile.Rules
+
+ifeq ($(MPI),1)
+CXX := $(MPICXX)
+MPI_FLAGS += -DKASKADE_HAVE_MPI
+INCLUDE := -I/usr/lib64/mpi/gcc/openmpi4/include $(INCLUDE)
+endif
 
 
 OPTFLAGS = # -O3 -DNDEBUG

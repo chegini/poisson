@@ -8,8 +8,12 @@
 #include "fem/lagrangespace.hh"
 #include "fem/spaces.hh"
 #include "io/vtk.hh"
+#ifdef KASKADE_HAVE_MPI
+#include <mpi.h>
+#endif
 #include "mg/add.hh"
 #include "mg/bddc.hpp"
+#include "poisson_bddc_options.hh"
 #include "utilities/gridGeneration.hh"
 #include "utilities/kaskopt.hh"
 #include "utilities/timing.hh"
@@ -269,6 +273,7 @@ int main(int argc, char** argv)
 
   int iter, interfaceTypes, n, m, threads, refinements;
   bool symmetricGrid, timing, vtk;
+  PoissonBddcOptions bddcOptions;
   double decompTol, tolerance;
   std::string prefix;
   if (getKaskadeOptions(argc,argv,Options
@@ -284,7 +289,17 @@ int main(int argc, char** argv)
   ("crisscross", symmetricGrid,  true,"meshing with criss-cross grid")
   ("interfacetypes",interfaceTypes, 7,"bit flags for coarse interfaces to include: 1 corner 2 edge 3 face")
   ("decompTol",   decompTol,   1000.0,"threshold for relative weak diagonal dominance violation / eps")
+  ("mpi",         bddcOptions.mpi, false, "enable owner-only MPI BDDC")
+  ("compression", bddcOptions.compression, false, "enable compressed BDDC transfers")
+  ("compressionBits", bddcOptions.compressionBits, 16, "quantization bits for compression")
+  ("graphLifting", bddcOptions.graphLifting, true, "use graph-lifting transform")
+  ("huffman", bddcOptions.huffman, true, "use Huffman transfer encoding")
+  ("bitlength", bddcOptions.bitlength, true, "use bit-length transfer encoding")
   )) return 0;
+
+  if (bddcOptions.mpi && vtk)
+    throw std::runtime_error("--vtk 1 is not supported with --mpi 1; use --vtk 0");
+  PoissonMpiSession mpiSession(argc,argv,bddcOptions.mpi);
 
   if (threads >= 0)
     NumaThreadPool::instance(threads);
@@ -357,77 +372,82 @@ int main(int argc, char** argv)
 
 //
   timer.start("alg subdom creation");
-  std::vector<std::unique_ptr<Subdomain<1>>> subsptr(n);
-  parallelFor(0,n,[&](int i)
-  {
-    subsptr[i] = std::make_unique<Subdomain<1>>(i,As[i],ifa);
-    subsptr[i]->setRhs(Fs[i]);
-  });
-  std::vector<Subdomain<1>> subs;
-  for (auto& sp: subsptr)
-    subs.push_back(std::move(*sp));
+  std::vector<NumaBCRSMatrix<Dune::FieldMatrix<double,1,1>> const*> matrices;
+  matrices.reserve(As.size());
+  for (auto const& matrix: As)
+    matrices.push_back(&matrix);
   timer.stop("alg subdom creation");
 
-  timer.start("bddc creation");
-  BDDCSolver<Subdomain<1>> bddcSolver(subs,ifa.coarseConstraints());
-  timer.stop("bddc creation");
-
-  std::vector<double> resNorm;
-  for (int k=0; k<iter; ++k)
+  auto run = [&]<class Transfer>()
   {
-    timer.start("BDDC solve");
-    resNorm.push_back(bddcSolver.solve());
-    timer.stop("BDDC solve");
-
-    if (vtk)
+    using BddcSubdomain = Subdomain<1,double,double,Transfer>;
+    auto subs = constructPoissonSubdomains<BddcSubdomain>(matrices,ifa,bddcOptions);
+    for (int i=0; i<n; ++i)
+      if (subs.has(i))
+        subs[i].setRhs(Fs[i]);
+    timer.start("bddc creation");
+    BDDCSolver<BddcSubdomain,decltype(subs)> bddcSolver(subs,ifa.coarseConstraints(),bddcOptions.mpi);
+    timer.stop("bddc creation");
+    std::vector<double> resNorm;
+    for (int k=0; k<iter; ++k)
     {
-      ScopedTimingSection out("output");
-      std::vector<std::string> files, filesCorr, filesRaw, filesRes, filesRestricted;
-      auto u = h1Space.element<1>();
-      auto du = h1Space.element<1>();
-      for (int i=0; i<n; ++i)
+      timer.start("BDDC solve");
+      resNorm.push_back(bddcSolver.solve());
+      timer.stop("BDDC solve");
+      if (vtk)
       {
-        auto ui = subs[i].getSolution();
-        auto dui = ui; subs[i].getCorrection(dui);
-        for (int j=0; j<ui.N(); ++j)
+        ScopedTimingSection out("output");
+        auto u = h1Space.element<1>();
+        auto du = h1Space.element<1>();
+        for (int i=0; i<n; ++i)
         {
-          u.coefficients()[subdomIndices[i][j]] = ui[j];
-          du.coefficients()[subdomIndices[i][j]] = dui[j];
+          auto ui = subs[i].getSolution();
+          auto dui = ui;
+          subs[i].getCorrection(dui);
+          for (int j=0; j<ui.N(); ++j)
+          {
+            u.coefficients()[subdomIndices[i][j]] = ui[j];
+            du.coefficients()[subdomIndices[i][j]] = dui[j];
+          }
+        }
+        writeVTK(u,prefix+"/sol-"+paddedString(k),IoOptions(),"u");
+        writeVTK(du,prefix+"/cor-"+paddedString(k),IoOptions(),"du");
+        u -= component<0>(uDirect); u *= -1;
+        writeVTK(u,prefix+"/err-"+paddedString(k),IoOptions(),"err");
+      }
+      if (resNorm.back() <= tolerance)
+        break;
+    }
+    if (poissonMpiRankZero(bddcOptions.mpi))
+    {
+      if (resNorm.size() >= 2)
+      {
+        int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
+        double older = resNorm[resNorm.size()-lookback-1];
+        if (older > 0)
+        {
+          double contraction = std::pow(resNorm.back()/older,1.0/lookback);
+          std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
         }
       }
-      writeVTK(u,prefix+"/sol-"+paddedString(k),IoOptions(),"u");
-      writeVTK(du,prefix+"/cor-"+paddedString(k),IoOptions(),"du");
-      u -= component<0>(uDirect); u *= -1;
-      writeVTK(u,prefix+"/err-"+paddedString(k),IoOptions(),"err");
+      auto ct = bddcSolver.compressionTraffic();
+      std::cout << "compression: raw sent=" << ct.originalSentBytes << " bytes, transmitted sent=" << ct.sentBytes << " bytes\n";
     }
+    return resNorm;
+  };
 
-    if (resNorm.back() <= tolerance)
-      break;
-  }
+  std::vector<double> resNorm;
+  if (bddcOptions.compression)
+    resNorm = run.template operator()<SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>>();
+  else
+    resNorm = run.template operator()<SpaceTransfer<1,double,double>>();
 
   timer.stop("BDDC");
 
 
 
 
-  if (resNorm.size() >= 2)
-  {
-    int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
-    double older = resNorm[resNorm.size()-lookback-1];
-    if (older > 0)
-    {
-      double contraction = std::pow(resNorm.back()/older,1.0/lookback);
-      std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
-    }
-    else
-      std::cout << "Contraction factor unavailable: reference residual is zero.\n";
-  }
-  else
-    std::cout << "Contraction factor unavailable: fewer than two iterations.\n";
-
-
-
-  if (timing)
+  if (timing && poissonMpiRankZero(bddcOptions.mpi))
     std::cout << timer;
   return 0;
 }
