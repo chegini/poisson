@@ -145,6 +145,7 @@ These options are available in both Poisson executables.
 | `--graphLifting` | `1` | Enable graph-lifting transform |
 | `--huffman` | `1` | Enable Huffman coding |
 | `--bitlength` | `1` | Enable bit-length/tail encoding |
+| `--histogram` | `0` | Write compression symbol histograms below `--prefix` |
 
 Plain BDDC uses:
 
@@ -189,6 +190,48 @@ tested as follows:
 --compression 1 --compressionBits 16 \
 --graphLifting 1 --huffman 1 --bitlength 1
 ```
+
+To export the empirical symbol distributions used by the compression setup,
+add `--histogram 1`. The output directory is the value of `--prefix`; it is
+created automatically for histogram output. The run writes CSV files for
+restriction and prolongation:
+
+```text
+restrict_raw.csv          quantized symbols before bit-length coding
+restrict_zigzag.csv       zigzag/unsigned symbol representation
+restrict_bitlength.csv    symbols supplied to the Huffman codebook
+prolongate_raw.csv
+prolongate_zigzag.csv
+prolongate_bitlength.csv
+metadata.txt              active transform and bit-length settings
+```
+
+Example for the full pipeline:
+
+```bash
+./bddc \
+  --mpi 0 \
+  --compression 1 \
+  --compressionBits 16 \
+  --graphLifting 1 \
+  --huffman 1 \
+  --bitlength 1 \
+  --histogram 1 \
+  --threads 2 \
+  --subres 8 \
+  --elmres 64 \
+  --iter 20 \
+  --tol 1e-10 \
+  --vtk 0 \
+  --timing 1 \
+  --prefix output/poisson-study/histograms/full16
+```
+
+The histogram is collected from the first shared-codebook training exchange.
+With the current Poisson executable, histogram collection is meaningful when
+`--huffman 1` is enabled. The current quantized type is unsigned, so the
+zigzag file is an explicit identity-stage record; signed quantized types would
+show the signed-to-unsigned zigzag mapping there.
 
 Test the precision/communication trade-off with:
 

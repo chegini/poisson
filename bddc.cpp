@@ -13,26 +13,9 @@
 #include "utilities/timing.hh"
 
 #include <iostream>
+#include <filesystem>
 
 using namespace Kaskade;
-
-
-std::array<std::vector<int>,2> histogram{std::vector<int>(100),std::vector<int>(100)};
-
-template <class Vector>
-void addToHistogram(Vector const& x, int n)
-{
-  int N = histogram[n].size();
-
-  auto [mn,mx] = std::minmax_element(x.begin(),x.end());
-  double r = std::max(std::abs((*mn)[0]),std::abs((*mx)[0]));
-  for (auto xi: x)
-  {
-    int i = r==0? 0: (int)( (N-1)*((xi[0]+r)/(2*r)) );
-    ++histogram[n][i];
-  }
-}
-
 
 
 #ifdef KASKADE_HAVE_MPI
@@ -339,7 +322,7 @@ int main(int argc, char** argv)
 
 
   int iter, interfaceTypes, n, m, threads;
-  bool symmetricGrid, timing, vtk;
+  bool symmetricGrid, timing, vtk, histogram;
   PoissonBddcOptions bddcOptions;
   double sigma, tolerance;
   std::string prefix;
@@ -361,6 +344,7 @@ int main(int argc, char** argv)
   ("graphLifting", bddcOptions.graphLifting, true, "use graph-lifting transform")
   ("huffman", bddcOptions.huffman, true, "use Huffman transfer encoding")
   ("bitlength", bddcOptions.bitlength, true, "use bit-length transfer encoding")
+  ("histogram", histogram, false, "write compression symbol histograms")
   )) return 0;
 
   if (bddcOptions.mpi && vtk)
@@ -445,6 +429,9 @@ int main(int argc, char** argv)
     timer.start("bddc creation");
     BDDCSolver<BddcSubdomain,decltype(subs)> bddcSolver(subs,ifa.coarseConstraints(),bddcOptions.mpi);
     timer.stop("bddc creation");
+    if (histogram && poissonMpiRankZero(bddcOptions.mpi))
+      std::filesystem::create_directories(prefix);
+    bddcSolver.setHistogramOutput(histogram ? prefix : "");
 
     std::vector<double> resNorm;
     bool solverStopped = false;
@@ -519,10 +506,6 @@ int main(int argc, char** argv)
 
   if (timing && poissonMpiRankZero(bddcOptions.mpi))
     std::cout << timer;
-
-std::ofstream hist("histogram.gnu");
-for (int i=0; i<histogram[0].size(); ++i)
-  hist << i << ' ' << histogram[0][i] << ' ' << histogram[1][i] << '\n';
 
   return 0;
 }
