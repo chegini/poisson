@@ -447,11 +447,22 @@ int main(int argc, char** argv)
     timer.stop("bddc creation");
 
     std::vector<double> resNorm;
+    bool solverStopped = false;
     for (int k=0; k<iter; ++k)
     {
       timer.start("BDDC solve");
       resNorm.push_back(bddcSolver.solve());
       timer.stop("BDDC solve");
+      if (bddcSolver.stopped())
+      {
+        solverStopped = true;
+        if (poissonMpiRankZero(bddcOptions.mpi))
+        {
+          std::cout << "BDDC stopped before applying the current correction: "
+                    << (bddcSolver.stagnated() ? "stagnation" : "breakdown") << ".\n";
+        }
+        break;
+      }
       if (vtk)
       {
         ScopedTimingSection out("output");
@@ -479,7 +490,7 @@ int main(int argc, char** argv)
     }
     if (poissonMpiRankZero(bddcOptions.mpi))
     {
-      if (resNorm.size() >= 2)
+      if (!solverStopped && resNorm.size() >= 2)
       {
         int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
         double older = resNorm[resNorm.size()-lookback-1];
