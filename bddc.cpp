@@ -344,6 +344,7 @@ int main(int argc, char** argv)
   ("graphLifting", bddcOptions.graphLifting, true, "use graph-lifting transform")
   ("huffman", bddcOptions.huffman, true, "use Huffman transfer encoding")
   ("bitlength", bddcOptions.bitlength, true, "use bit-length transfer encoding")
+  ("zigzag", bddcOptions.zigzag, true, "use zigzag signed-symbol mapping")
   ("histogram", histogram, false, "write compression symbol histograms")
   )) return 0;
 

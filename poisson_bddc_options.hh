@@ -22,6 +22,7 @@ struct PoissonBddcOptions
   bool graphLifting = true;
   bool huffman = true;
   bool bitlength = true;
+  bool zigzag = true;
 };
 
 inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& options)
@@ -34,6 +35,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
                   transfer.setProlongateTransform(true);
                   transfer.setRestrictBitlengthEncoding(true);
                   transfer.setProlongateBitlengthEncoding(true);
+                  transfer.setRestrictZigzagEncoding(true);
+                  transfer.setProlongateZigzagEncoding(true);
                 })
   {
     transfer.setQuantizationBits(options.compressionBits);
@@ -46,6 +49,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
     transfer.setProlongateTransform(options.graphLifting);
     transfer.setRestrictBitlengthEncoding(options.bitlength);
     transfer.setProlongateBitlengthEncoding(options.bitlength);
+    transfer.setRestrictZigzagEncoding(options.zigzag);
+    transfer.setProlongateZigzagEncoding(options.zigzag);
   }
 }
 
