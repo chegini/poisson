@@ -143,6 +143,7 @@ These options are available in both Poisson executables.
 | `--compression` | `0` | Enable compressed BDDC transfer |
 | `--compressionBits` | `16` | Quantization precision |
 | `--graphLifting` | `1` | Enable graph-lifting transform |
+| `--graphLiftingAfterQuantization` | `0` | Apply reversible integer graph lifting after quantization |
 | `--huffman` | `1` | Enable Huffman coding |
 | `--bitlength` | `1` | Enable bit-length/tail encoding |
 | `--histogram` | `0` | Write compression symbol histograms below `--prefix` |
@@ -167,8 +168,8 @@ The transfer pipeline is:
 
 ```text
 interface vector
--> graph lifting
 -> quantization
+-> optional graph lifting before quantization, or reversible integer graph lifting after quantization
 -> bit-length encoding
 -> Huffman coding
 -> packed payload
@@ -189,6 +190,11 @@ tested as follows:
 # Full compression pipeline
 --compression 1 --compressionBits 16 \
 --graphLifting 1 --huffman 1 --bitlength 1
+
+# Reversible graph lifting after quantization
+--compression 1 --compressionBits 16 \
+--graphLifting 0 --graphLiftingAfterQuantization 1 \
+--huffman 1 --bitlength 1
 ```
 
 To export the empirical symbol distributions used by the compression setup,
@@ -225,6 +231,28 @@ Example for the full pipeline:
   --vtk 0 \
   --timing 1 \
   --prefix output/poisson-study/histograms/full16
+```
+
+For a direct comparison, use separate output directories:
+
+```bash
+# No graph lifting
+./bddc --mpi 0 --compression 1 --compressionBits 22 \
+  --graphLifting 0 --graphLiftingAfterQuantization 0 \
+  --huffman 1 --bitlength 1 --zigzag 1 --vtk 0 \
+  --iter 20 --prefix output/poisson-study/no-lifting
+
+# Graph lifting before quantization
+./bddc --mpi 0 --compression 1 --compressionBits 22 \
+  --graphLifting 1 --graphLiftingAfterQuantization 0 \
+  --huffman 1 --bitlength 1 --zigzag 1 --vtk 0 \
+  --iter 20 --prefix output/poisson-study/before-quantization
+
+# Graph lifting after quantization
+./bddc --mpi 0 --compression 1 --compressionBits 22 \
+  --graphLifting 0 --graphLiftingAfterQuantization 1 \
+  --huffman 1 --bitlength 1 --zigzag 1 --vtk 0 \
+  --iter 20 --prefix output/poisson-study/after-quantization
 ```
 
 The histogram is collected from the first shared-codebook training exchange.
