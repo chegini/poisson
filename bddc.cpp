@@ -493,7 +493,25 @@ int main(int argc, char** argv)
       if (nIter > 0)
         std::cout << "average amount of data exchanged per iteration: init=" << iB/(nIter*1024.0) << "kb restriction=" << rB/(nIter*1024.0) << "kb prolongation=" << pB/(nIter*1024.0) << "kb coarseGrid=" << cB/(nIter*1024.0) << "kb\n";
       auto ct = bddcSolver.compressionTraffic();
-      std::cout << "compression: raw sent=" << ct.originalSentBytes << " bytes, transmitted sent=" << ct.sentBytes << " bytes\n";
+      auto const savedBytes = static_cast<std::int64_t>(ct.originalSentBytes)
+                            - static_cast<std::int64_t>(ct.sentBytes);
+      auto const savedBits = 8 * savedBytes;
+      auto const savings = ct.originalSentBytes > 0
+                             ? 100.0 * static_cast<double>(savedBytes)
+                               / static_cast<double>(ct.originalSentBytes)
+                             : 0.0;
+      auto const ratio = ct.sentBytes > 0
+                           ? static_cast<double>(ct.originalSentBytes) / static_cast<double>(ct.sentBytes)
+                           : 0.0;
+      std::cout << "Compression report (BDDC):\n"
+                << "  raw sent bytes: " << ct.originalSentBytes << "\n"
+                << "  transmitted sent bytes: " << ct.sentBytes << "\n"
+                << "  bits saved: " << savedBits << "\n"
+                << "  savings: " << savings << "%\n"
+                << "  ratio: " << ratio << ":1\n"
+                << "  shared codebook estimate: " << ct.codebookBits << " bits\n"
+                << "  raw received bytes: " << ct.originalReceivedBytes << "\n"
+                << "  received bytes: " << ct.receivedBytes << "\n";
     }
     return resNorm;
   };
