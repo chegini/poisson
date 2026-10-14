@@ -20,6 +20,7 @@ struct PoissonBddcOptions
   bool compression = false;
   int compressionBits = 16;
   bool graphLifting = true;
+  bool graphLiftingAfterQuantization = false;
   bool huffman = true;
   bool bitlength = true;
   bool zigzag = true;
@@ -33,6 +34,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
                   transfer.setProlongateEncoding(true);
                   transfer.setRestrictTransform(true);
                   transfer.setProlongateTransform(true);
+                  transfer.setRestrictTransformAfterQuantization(true);
+                  transfer.setProlongateTransformAfterQuantization(true);
                   transfer.setRestrictBitlengthEncoding(true);
                   transfer.setProlongateBitlengthEncoding(true);
                   transfer.setRestrictZigzagEncoding(true);
@@ -40,13 +43,15 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
                 })
   {
     transfer.setQuantizationBits(options.compressionBits);
-    transfer.enableTransform(options.graphLifting
+    transfer.enableTransform((options.graphLifting || options.graphLiftingAfterQuantization)
                                ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                : Kaskade::BDDC::TransformType::NONE);
     transfer.setRestrictEncoding(options.huffman);
     transfer.setProlongateEncoding(options.huffman);
     transfer.setRestrictTransform(options.graphLifting);
     transfer.setProlongateTransform(options.graphLifting);
+    transfer.setRestrictTransformAfterQuantization(options.graphLiftingAfterQuantization);
+    transfer.setProlongateTransformAfterQuantization(options.graphLiftingAfterQuantization);
     transfer.setRestrictBitlengthEncoding(options.bitlength);
     transfer.setProlongateBitlengthEncoding(options.bitlength);
     transfer.setRestrictZigzagEncoding(options.zigzag);
