@@ -44,6 +44,9 @@ case "$LIFTING_MODE" in
 esac
 
 CASE="${LIFTING_NAME}_bits-${BITS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+if [[ "$HISTOGRAM" == 1 ]]; then
+  CASE="${CASE}_histogram"
+fi
 RUN="output/poisson-study/${CASE}"
 LOG="logs/poisson-${CASE}.log"
 
