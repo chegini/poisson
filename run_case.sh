@@ -19,6 +19,12 @@ HISTOGRAM=${HISTOGRAM:-0}
 SIGMA=${SIGMA:-1.0}
 INTERFACE_TYPES=${INTERFACE_TYPES:-7}
 CRISSCROSS=${CRISSCROSS:-1}
+EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
+
+case "$EXCLUDE_CORNERS" in
+  0|1) ;;
+  *) printf 'Invalid EXCLUDE_CORNERS=%s; use 0 or 1\n' "$EXCLUDE_CORNERS" >&2; exit 2 ;;
+esac
 
 case "$LIFTING_MODE" in
   0)
@@ -43,7 +49,7 @@ case "$LIFTING_MODE" in
     ;;
 esac
 
-CASE="${LIFTING_NAME}_bits-${BITS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+CASE="${LIFTING_NAME}_bits-${BITS}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
 if [[ "$HISTOGRAM" == 1 ]]; then
   CASE="${CASE}_histogram"
 fi
@@ -71,5 +77,6 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --sigma "$SIGMA" \
   --interfacetypes "$INTERFACE_TYPES" \
   --crisscross "$CRISSCROSS" \
+  --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS" \
   --prefix "$RUN" \
   2>&1 | tee "$LOG"

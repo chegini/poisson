@@ -21,6 +21,7 @@ struct PoissonBddcOptions
   int compressionBits = 16;
   bool graphLifting = true;
   bool graphLiftingAfterQuantization = false;
+  bool excludeCornersFromCompression = false;
   bool huffman = true;
   bool bitlength = true;
   bool zigzag = true;
@@ -118,7 +119,8 @@ auto constructPoissonSubdomains(std::vector<MatrixPointer> const& matrixPointers
     if (layout.owns(static_cast<int>(id)))
     {
       auto const& matrix = *matrixPointers[id];
-      storage.emplace(id,static_cast<int>(id),matrix,interfaces);
+      storage.emplace(id,static_cast<int>(id),matrix,interfaces,
+                      options.excludeCornersFromCompression);
       if constexpr (requires(Subdomain& subdomain, decltype(matrix) matrixObject) {
                       subdomain.transfer().setGraphLiftingFromMatrix(matrixObject);
                     })
