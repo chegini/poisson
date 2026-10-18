@@ -410,6 +410,11 @@ int main(int argc, char** argv)
     if (s.size() > 1)                   // consider this only if more than one local dof is affected
       sharedDofs.push_back(s);          // - otherwise this is a boundary node
   InterfaceAverages<1,int> ifa(sharedDofs,subdomSize,interfaceTypes);
+  auto const interfaceCount = ifa.interfaceCount();
+  std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
+            << ", edges=" << interfaceCount[1]
+            << ", faces=" << interfaceCount[2]
+            << " (interfacetypes=" << interfaceTypes << ")" << std::endl;
   timer.stop("interface creation");
 
   timer.start("alg subdom creation");
