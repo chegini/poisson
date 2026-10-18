@@ -1,14 +1,16 @@
 KASKADE7 ?= /kaskade7
 MPI ?= 1
 MPICXX ?= mpicxx
+MPI_FORCE_INCLUDE ?=
 
 include $(KASKADE7)/Makefile.Local
 include $(KASKADE7)/Makefile.Rules
 
 ifeq ($(MPI),1)
-CXX := $(MPICXX)
-MPI_FLAGS += -DKASKADE_HAVE_MPI
-INCLUDE := -I/usr/lib64/mpi/gcc/openmpi4/include $(INCLUDE)
+CXX := $(MPICXX) $(MPI_FORCE_INCLUDE)
+MPI_INCLUDE_FLAGS ?= -I/home/htc/fchegini/opencarp_dependencies/petsc_install/include
+MPI_FLAGS += $(MPI_INCLUDE_FLAGS) -DKASKADE_HAVE_MPI
+INCLUDE := $(MPI_INCLUDE_FLAGS) $(INCLUDE)
 endif
 
 

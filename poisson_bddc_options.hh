@@ -1,6 +1,10 @@
 #ifndef POISSON_BDDC_OPTIONS_HH
 #define POISSON_BDDC_OPTIONS_HH
 
+#ifdef KASKADE_HAVE_MPI
+#include <mpi.h>
+#endif
+
 #include "mg/bddc.hpp"
 #include "utilities/kaskopt.hh"
 
@@ -9,10 +13,6 @@
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
-
-#ifdef KASKADE_HAVE_MPI
-#include <mpi.h>
-#endif
 
 struct PoissonBddcOptions
 {

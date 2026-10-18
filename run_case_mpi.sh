@@ -7,7 +7,7 @@ ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 MPI_RANKS=${MPI_RANKS:-1}
-MPI_LAUNCHER=${MPI_LAUNCHER:-/usr/lib64/mpi/gcc/openmpi4/bin/mpirun}
+MPI_LAUNCHER=${MPI_LAUNCHER:-/home/htc/fchegini/opencarp_dependencies/petsc_install/bin/mpirun}
 MPI_ALLOW_ROOT=${MPI_ALLOW_ROOT:-0}
 
 MPI_ARGS=(-np "$MPI_RANKS")
@@ -65,7 +65,7 @@ LOG="logs/poisson-${CASE}.log"
 
 mkdir -p "$RUN" "$(dirname "$LOG")"
 
-"$MPI_LAUNCHER" "${MPI_ARGS[@]}" "$EXECUTABLE" \
+"$MPI_LAUNCHER" -bootstrap fork "${MPI_ARGS[@]}" "$EXECUTABLE" \
   --mpi 1 \
   --compression 1 \
   --compressionBits "$BITS" \

@@ -1,3 +1,7 @@
+#ifdef KASKADE_HAVE_MPI
+#include <mpi.h>
+#endif
+
 #include "dune/common/config.h"
 #include "dune/grid/config.h"
 #include "dune/grid/uggrid.hh"
@@ -18,9 +22,6 @@
 using namespace Kaskade;
 
 
-#ifdef KASKADE_HAVE_MPI
-#include <mpi.h>
-#endif
 #include "mg/bddc.hpp"
 #include "poisson_bddc_options.hh"
 
