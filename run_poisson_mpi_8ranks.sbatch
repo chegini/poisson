@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-BASE=/data/numerik/people/fchegini/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC
+BASE=/data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC
 IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
 
