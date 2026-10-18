@@ -29,6 +29,31 @@ make clean KASKADE7=/kaskade7 MPI=1
 make -j1 KASKADE7=/kaskade7 MPI=1 MPICXX=mpicxx
 ```
 
+### Cluster workflow
+
+The Slurm build script compiles the MPI-enabled Poisson executables inside
+the container:
+
+```bash
+sbatch build_poisson.sbatch
+```
+
+The build is needed after changing Poisson source files, changing Kaskade
+headers, or when `bddc` is missing. Reconnecting to the cluster or running on
+a different login or compute node does not by itself require a rebuild because
+the project is stored on the shared filesystem.
+
+After a successful build, submit the two benchmark runs independently:
+
+```bash
+sbatch run_poisson_serial_8threads.sbatch
+sbatch run_poisson_mpi_8ranks.sbatch
+```
+
+The first job runs one MPI process with eight Kaskade threads. The second runs
+eight MPI ranks with one thread per rank. Logs are written to
+`logs/poisson-serial8-<jobid>.out` and `logs/poisson-mpi8-<jobid>.out`.
+
 ## Common options
 
 These options are available in both executables.
