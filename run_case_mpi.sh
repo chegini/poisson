@@ -9,8 +9,10 @@ BITLENGTH=${BITLENGTH:-1}
 MPI_RANKS=${MPI_RANKS:-1}
 MPI_LAUNCHER=${MPI_LAUNCHER:-/home/htc/fchegini/opencarp_dependencies/petsc_install/bin/mpirun}
 MPI_ALLOW_ROOT=${MPI_ALLOW_ROOT:-0}
+MPI_BIND_ARGS=${MPI_BIND_ARGS:--bind-to core}
 
 MPI_ARGS=(-np "$MPI_RANKS")
+read -r -a MPI_BIND_ARRAY <<< "$MPI_BIND_ARGS"
 if [[ "$MPI_ALLOW_ROOT" == 1 ]]; then
   MPI_ARGS+=(--allow-run-as-root)
 fi
@@ -65,7 +67,7 @@ LOG="logs/poisson-${CASE}.log"
 
 mkdir -p "$RUN" "$(dirname "$LOG")"
 
-"$MPI_LAUNCHER" -bootstrap fork "${MPI_ARGS[@]}" "$EXECUTABLE" \
+"$MPI_LAUNCHER" "${MPI_BIND_ARRAY[@]}" -bootstrap fork "${MPI_ARGS[@]}" "$EXECUTABLE" \
   --mpi 1 \
   --compression 1 \
   --compressionBits "$BITS" \

@@ -434,27 +434,9 @@ int main(int argc, char** argv)
           std::cout << "Estimated contraction factor: " << contraction << ". (kappa ~ " << (1+contraction)/(1-contraction) << ").\n";
         }
       }
-      auto ct = bddcSolver.compressionTraffic();
-      auto const savedBytes = static_cast<std::int64_t>(ct.originalSentBytes)
-                            - static_cast<std::int64_t>(ct.sentBytes);
-      auto const savedBits = 8 * savedBytes;
-      auto const savings = ct.originalSentBytes > 0
-                             ? 100.0 * static_cast<double>(savedBytes)
-                               / static_cast<double>(ct.originalSentBytes)
-                             : 0.0;
-      auto const ratio = ct.sentBytes > 0
-                           ? static_cast<double>(ct.originalSentBytes) / static_cast<double>(ct.sentBytes)
-                           : 0.0;
-      std::cout << "Compression report (BDDC):\n"
-                << "  raw sent bytes: " << ct.originalSentBytes << "\n"
-                << "  transmitted sent bytes: " << ct.sentBytes << "\n"
-                << "  bits saved: " << savedBits << "\n"
-                << "  savings: " << savings << "%\n"
-                << "  ratio: " << ratio << ":1\n"
-                << "  shared codebook estimate: " << ct.codebookBits << " bits\n"
-                << "  raw received bytes: " << ct.originalReceivedBytes << "\n"
-                << "  received bytes: " << ct.receivedBytes << "\n";
     }
+    if (bddcOptions.compression)
+      printPoissonCompressionReport(bddcSolver.compressionTraffic(),bddcOptions.mpi);
     return resNorm;
   };
 

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <iostream>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -105,6 +106,79 @@ inline bool poissonMpiRankZero(bool enabled)
   (void)enabled;
 #endif
   return true;
+}
+
+template <class Traffic>
+inline void printPoissonCompressionReport(Traffic const& local, bool mpiEnabled)
+{
+  auto print = [](Traffic const& traffic)
+  {
+    auto const savedBytes = static_cast<std::int64_t>(traffic.originalSentBytes)
+                          - static_cast<std::int64_t>(traffic.sentBytes);
+    auto const savedBits = 8 * savedBytes;
+    auto const savings = traffic.originalSentBytes > 0
+                           ? 100.0 * static_cast<double>(savedBytes)
+                             / static_cast<double>(traffic.originalSentBytes)
+                           : 0.0;
+    auto const ratio = traffic.sentBytes > 0
+                         ? static_cast<double>(traffic.originalSentBytes)
+                           / static_cast<double>(traffic.sentBytes)
+                         : 0.0;
+    std::cout << "Compression report (BDDC, global):\n"
+              << "  raw sent bytes: " << traffic.originalSentBytes << "\n"
+              << "  transmitted sent bytes: " << traffic.sentBytes << "\n"
+              << "  bits saved: " << savedBits << "\n"
+              << "  savings: " << savings << "%\n"
+              << "  ratio: " << ratio << ":1\n"
+              << "  shared codebook estimate: " << traffic.codebookBits << " bits\n"
+              << "  raw received bytes: " << traffic.originalReceivedBytes << "\n"
+              << "  received bytes: " << traffic.receivedBytes << "\n"
+              << "  encode time (rank-summed): " << traffic.encodeTimeMs << " ms\n"
+              << "  decode time (rank-summed): " << traffic.decodeTimeMs << " ms\n";
+  };
+
+#ifdef KASKADE_HAVE_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (mpiEnabled && initialized)
+  {
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+
+    unsigned long long localBytes[4] = {
+      static_cast<unsigned long long>(local.originalSentBytes),
+      static_cast<unsigned long long>(local.originalReceivedBytes),
+      static_cast<unsigned long long>(local.sentBytes),
+      static_cast<unsigned long long>(local.receivedBytes)};
+    unsigned long long globalBytes[4] = {0,0,0,0};
+    MPI_Allreduce(localBytes,globalBytes,4,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+
+    double localTimes[2] = {local.encodeTimeMs,local.decodeTimeMs};
+    double globalTimes[2] = {0.0,0.0};
+    MPI_Allreduce(localTimes,globalTimes,2,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+
+    unsigned long long localCodebook = static_cast<unsigned long long>(local.codebookBits);
+    unsigned long long globalCodebook = 0;
+    MPI_Allreduce(&localCodebook,&globalCodebook,1,MPI_UNSIGNED_LONG_LONG,MPI_MAX,MPI_COMM_WORLD);
+
+    if (rank != 0)
+      return;
+
+    Traffic global = local;
+    global.originalSentBytes = globalBytes[0];
+    global.originalReceivedBytes = globalBytes[1];
+    global.sentBytes = globalBytes[2];
+    global.receivedBytes = globalBytes[3];
+    global.encodeTimeMs = globalTimes[0];
+    global.decodeTimeMs = globalTimes[1];
+    global.codebookBits = globalCodebook;
+    print(global);
+    return;
+  }
+#else
+  (void)mpiEnabled;
+#endif
+  print(local);
 }
 
 template <class Subdomain, class MatrixPointer, class Interfaces>
