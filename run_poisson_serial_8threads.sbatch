@@ -16,6 +16,7 @@ ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
 HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
 THREADS=${THREADS:-8}
 BITS=${BITS:-22}
+MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
 
 cd "$BASE/poisson_new_scratch"
@@ -36,7 +37,7 @@ srun --ntasks=1 --cpu-bind=cores --hint=nomultithread podman run --rm --pull=nev
   -v "$BASE:/BDDC" \
   -w /BDDC/poisson_new_scratch \
   "$IMAGE" \
-  bash -lc "THREADS=$THREADS BITS=$BITS LIFTING_MODE=1 EXCLUDE_CORNERS=$EXCLUDE_CORNERS VTK=0 ./run_case.sh"
+  bash -lc "THREADS=$THREADS BITS=$BITS MIN_INTERFACE_SIZE=$MIN_INTERFACE_SIZE LIFTING_MODE=1 EXCLUDE_CORNERS=$EXCLUDE_CORNERS VTK=0 ./run_case.sh"
 
 if command -v sacct >/dev/null 2>&1; then
   sacct -j "$SLURM_JOB_ID" --format=JobID,State,Elapsed,TotalCPU,AllocCPUS,MaxRSS

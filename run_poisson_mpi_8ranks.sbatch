@@ -18,6 +18,7 @@ HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
 MPI_RANKS=${MPI_RANKS:-8}
 THREADS=${THREADS:-1}
 BITS=${BITS:-22}
+MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
 WRAPPER_CPUS=${WRAPPER_CPUS:-$MPI_RANKS}
 
@@ -42,6 +43,7 @@ srun --ntasks=1 --cpus-per-task="$WRAPPER_CPUS" --cpu-bind=cores --hint=nomultit
   -e MPI_RANKS="$MPI_RANKS" \
   -e THREADS="$THREADS" \
   -e BITS="$BITS" \
+  -e MIN_INTERFACE_SIZE="$MIN_INTERFACE_SIZE" \
   -e LIFTING_MODE=1 \
   -e EXCLUDE_CORNERS="$EXCLUDE_CORNERS" \
   -e MPI_BIND_ARGS="-bind-to core" \

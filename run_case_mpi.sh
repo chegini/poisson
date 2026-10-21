@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BITS=${BITS:-22}
+MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
 LIFTING_MODE=${LIFTING_MODE:-2}
 ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
@@ -71,6 +72,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --mpi 1 \
   --compression 1 \
   --compressionBits "$BITS" \
+  --compressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
   --graphLifting "$LIFTING" \
   --graphLiftingAfterQuantization "$AFTER_QUANTIZATION" \
   --huffman "$HUFFMAN" \

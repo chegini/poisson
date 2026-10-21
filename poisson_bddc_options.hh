@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <type_traits>
@@ -20,6 +21,7 @@ struct PoissonBddcOptions
   bool mpi = false;
   bool compression = false;
   int compressionBits = 16;
+  int compressionMinInterfaceSize = 0;
   bool graphLifting = true;
   bool graphLiftingAfterQuantization = false;
   bool excludeCornersFromCompression = false;
@@ -45,6 +47,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
                 })
   {
     transfer.setQuantizationBits(options.compressionBits);
+    if constexpr (requires { transfer.setCompressionMinInterfaceSize(0); })
+      transfer.setCompressionMinInterfaceSize(static_cast<std::size_t>(std::max(0, options.compressionMinInterfaceSize)));
     transfer.enableTransform((options.graphLifting || options.graphLiftingAfterQuantization)
                                ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                : Kaskade::BDDC::TransformType::NONE);
