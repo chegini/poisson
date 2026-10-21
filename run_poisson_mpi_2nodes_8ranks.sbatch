@@ -26,6 +26,7 @@ THREADS=${THREADS:-1}
 CPUS_PER_RANK=${CPUS_PER_RANK:-1}
 BITS=${BITS:-22}
 MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
+THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-4}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
@@ -41,6 +42,7 @@ echo "MPI mode: $MPI_IMPL"
 echo "Ranks per node: ${SLURM_NTASKS_PER_NODE:-unknown}"
 echo "Bits: $BITS"
 echo "Minimum interface size: $MIN_INTERFACE_SIZE"
+echo "Threshold interface types: $THRESHOLD_INTERFACE_TYPES"
 echo "CPU binding: cores"
 echo "CPUs per rank: $CPUS_PER_RANK"
 
@@ -86,6 +88,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --compression 1 \
         --compressionBits "$BITS" \
         --compressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
+        --compressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
         --graphLifting 0 \
         --graphLiftingAfterQuantization 1 \
         --huffman 1 \

@@ -3,6 +3,7 @@ set -euo pipefail
 
 BITS=${BITS:-22}
 MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
+THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-4}
 LIFTING_MODE=${LIFTING_MODE:-2}
 ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
@@ -73,6 +74,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --compression 1 \
   --compressionBits "$BITS" \
   --compressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
+  --compressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
   --graphLifting "$LIFTING" \
   --graphLiftingAfterQuantization "$AFTER_QUANTIZATION" \
   --huffman "$HUFFMAN" \

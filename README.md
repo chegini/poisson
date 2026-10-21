@@ -168,6 +168,7 @@ These options are available in both Poisson executables.
 | `--compression` | `0` | Enable compressed BDDC transfer |
 | `--compressionBits` | `16` | Quantization precision |
 | `--compressionMinInterfaceSize` | `0` | Minimum scalar interface size for Huffman coding; `0` encodes all interfaces |
+| `--compressionThresholdInterfaceTypes` | `4` | Interface type receiving the size threshold: `2=edge`, `4=face`, `0=all` |
 | `--graphLifting` | `1` | Enable graph-lifting transform |
 | `--graphLiftingAfterQuantization` | `0` | Apply reversible integer graph lifting after quantization |
 | `--huffman` | `1` | Enable Huffman coding |

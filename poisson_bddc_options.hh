@@ -22,6 +22,7 @@ struct PoissonBddcOptions
   bool compression = false;
   int compressionBits = 16;
   int compressionMinInterfaceSize = 0;
+  int compressionThresholdInterfaceTypes = Kaskade::BDDC::FACE;
   bool graphLifting = true;
   bool graphLiftingAfterQuantization = false;
   bool excludeCornersFromCompression = false;
@@ -49,6 +50,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
     transfer.setQuantizationBits(options.compressionBits);
     if constexpr (requires { transfer.setCompressionMinInterfaceSize(0); })
       transfer.setCompressionMinInterfaceSize(static_cast<std::size_t>(std::max(0, options.compressionMinInterfaceSize)));
+    if constexpr (requires { transfer.setCompressionThresholdInterfaceTypes(0); })
+      transfer.setCompressionThresholdInterfaceTypes(options.compressionThresholdInterfaceTypes);
     transfer.enableTransform((options.graphLifting || options.graphLiftingAfterQuantization)
                                ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                : Kaskade::BDDC::TransformType::NONE);
