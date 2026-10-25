@@ -16,6 +16,7 @@
 set -euo pipefail
 
 BASE=/data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC
+SCRATCH_DIR="$BASE/poisson_new_scratch"
 KASKADE7=/data/numerik/people/fchegini/kaskade7_new
 IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
@@ -28,11 +29,30 @@ BITS=${BITS:-22}
 MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
 THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-4}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
+SUBRES=${SUBRES:-4}
+ELMRES=${ELMRES:-64}
+ITER=${ITER:-20}
+TOL=${TOL:-1e-10}
+COMPRESSION=${COMPRESSION:-1}
+GRAPH_LIFTING=${GRAPH_LIFTING:-0}
+GRAPH_LIFTING_AFTER_QUANTIZATION=${GRAPH_LIFTING_AFTER_QUANTIZATION:-1}
+HUFFMAN=${HUFFMAN:-1}
+BITLENGTH=${BITLENGTH:-1}
+ZIGZAG=${ZIGZAG:-1}
+HISTOGRAM=${HISTOGRAM:-0}
+INTERFACE_TYPES=${INTERFACE_TYPES:-7}
+CRISSCROSS=${CRISSCROSS:-1}
+CASE_TAG=${CASE_TAG:-multi-node}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
-export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK
+export BASE SCRATCH_DIR KASKADE7 IMAGE ARCHIVE HOST_MPI RUN BITS MIN_INTERFACE_SIZE \
+  THRESHOLD_INTERFACE_TYPES EXCLUDE_CORNERS THREADS CPUS_PER_RANK \
+  SUBRES ELMRES ITER TOL COMPRESSION GRAPH_LIFTING GRAPH_LIFTING_AFTER_QUANTIZATION \
+  HUFFMAN BITLENGTH ZIGZAG HISTOGRAM INTERFACE_TYPES CRISSCROSS CASE_TAG
 
-cd "$BASE/poisson_new_scratch"
+cd "$SCRATCH_DIR"
+HOST_WORKDIR="$PWD"
+export HOST_WORKDIR
 mkdir -p logs "$RUN"
 
 echo "Job ID: $SLURM_JOB_ID"
@@ -46,66 +66,58 @@ echo "Threshold interface types: $THRESHOLD_INTERFACE_TYPES"
 echo "CPU binding: cores"
 echo "CPUs per rank: $CPUS_PER_RANK"
 
-srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 bash -lc '
-  if ! podman image exists '"$IMAGE"'; then
-    podman load -i '"$ARCHIVE"'
-  fi
-  podman image exists '"$IMAGE"'
-'
-
 # Keep one stdout/stderr file per MPI task. Otherwise Slurm merges output from
 # all ranks, making concurrent solver and compression messages unreadable.
 srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
   --ntasks-per-node="$SLURM_NTASKS_PER_NODE" \
   --cpus-per-task="$CPUS_PER_RANK" \
-  --cpu-bind=cores --hint=nomultithread --distribution=block:block \
-  --kill-on-bad-exit=1 \
+  --time=04:00:00 \
+  --kill-on-bad-exit=0 \
   --output="logs/poisson-multi-%j-rank%t.out" \
   --error="logs/poisson-multi-%j-rank%t.err" \
   bash -lc '
-    set -euo pipefail
     : "${PMI_FD:?PMI_FD was not provided by Slurm}"
     eval "exec 3<&${PMI_FD}"
-    exec podman run --rm --pull=never \
+    podman run --rm --pull=never \
       --network=host \
       --ipc=host \
       --pid=host \
       --preserve-fds=1 \
       --env-host \
       -e PMI_FD=3 \
-      -v "$HOST_MPI:$HOST_MPI:ro" \
-      -e PATH=$HOST_MPI/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-      -e LD_LIBRARY_PATH=/kaskade7/libs:$HOST_MPI/lib:$HOST_MPI/lib64:/usr/local/lib64:/usr/local/lib \
+      -e PMI_RANK="$PMI_RANK" \
+      -e PMI_SIZE="$PMI_SIZE" \
+      -v "$HOST_MPI:/petsc:ro" \
+      -e PATH=/petsc/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      -e LD_LIBRARY_PATH=/kaskade7/libs:/petsc/lib:/petsc/lib64:/usr/local/lib64:/usr/local/lib \
       -e OMP_NUM_THREADS="$THREADS" \
-      -e OMP_PROC_BIND=close \
-      -e OMP_PLACES=cores \
       -v "$KASKADE7:/kaskade7" \
-      -v "$BASE:/BDDC" \
-      -w /BDDC/poisson_new_scratch \
+      -v "$HOST_WORKDIR:/BDDC" \
+      -w /BDDC \
       "$IMAGE" \
       ./bddc \
         --mpi 1 \
-        --compression 1 \
+        --compression "$COMPRESSION" \
         --compressionBits "$BITS" \
         --compressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
         --compressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
-        --graphLifting 0 \
-        --graphLiftingAfterQuantization 1 \
-        --huffman 1 \
-        --bitlength 1 \
-        --zigzag 1 \
+        --graphLifting "$GRAPH_LIFTING" \
+        --graphLiftingAfterQuantization "$GRAPH_LIFTING_AFTER_QUANTIZATION" \
+        --huffman "$HUFFMAN" \
+        --bitlength "$BITLENGTH" \
+        --zigzag "$ZIGZAG" \
         --threads "$THREADS" \
-        --subres 4 \
-        --elmres 64 \
-        --iter 20 \
-        --tol 1e-10 \
+        --subres "$SUBRES" \
+        --elmres "$ELMRES" \
+        --iter "$ITER" \
+        --tol "$TOL" \
+        --timing 0 \
         --vtk 0 \
-        --histogram 0 \
+        --histogram "$HISTOGRAM" \
         --sigma 1.0 \
-        --interfacetypes 7 \
-        --crisscross 1 \
-        --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS" \
-        --prefix "/BDDC/poisson_new_scratch/$RUN"
+        --interfacetypes "$INTERFACE_TYPES" \
+        --crisscross "$CRISSCROSS" \
+      --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS"
   '
 
 if command -v sacct >/dev/null 2>&1; then

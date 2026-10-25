@@ -205,6 +205,10 @@ interface vector
 The receiver applies the inverse operations. Compression variants can be
 tested as follows:
 
+`run_case_mpi.sh` includes `SUBRES`, `ELMRES`, and the optional `CASE_TAG` in
+the output directory name. This prevents parameter sweeps from overwriting
+one another.
+
 ```bash
 # Quantization only
 --compression 1 --compressionBits 16 \

@@ -31,6 +31,7 @@ INTERFACE_TYPES=${INTERFACE_TYPES:-7}
 CRISSCROSS=${CRISSCROSS:-1}
 EXECUTABLE=${EXECUTABLE:-./bddc}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
+CASE_TAG=${CASE_TAG:-}
 
 case "$EXCLUDE_CORNERS" in
   0|1) ;;
@@ -60,7 +61,10 @@ case "$LIFTING_MODE" in
     ;;
 esac
 
-CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_bits-${BITS}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_subres-${SUBRES}_elmres-${ELMRES}_bits-${BITS}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+if [[ -n "$CASE_TAG" ]]; then
+  CASE="${CASE_TAG}_${CASE}"
+fi
 if [[ "$HISTOGRAM" == 1 ]]; then
   CASE="${CASE}_histogram"
 fi
