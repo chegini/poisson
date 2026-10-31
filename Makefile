@@ -8,7 +8,7 @@ include $(KASKADE7)/Makefile.Rules
 
 ifeq ($(MPI),1)
 CXX := $(MPICXX) $(MPI_FORCE_INCLUDE)
-MPI_INCLUDE_FLAGS ?= -I/home/htc/fchegini/opencarp_dependencies/petsc_install/include
+MPI_INCLUDE_FLAGS ?=
 MPI_FLAGS += $(MPI_INCLUDE_FLAGS) -DKASKADE_HAVE_MPI
 INCLUDE := $(MPI_INCLUDE_FLAGS) $(INCLUDE)
 endif

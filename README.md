@@ -1,5 +1,109 @@
 # Poisson BDDC scratch example
 
+## Compression audit and validation (31 October 2026)
+
+The old `bddc` and `bddc-add` used `uint16_t` quantization symbols: requests above
+16 bits, including the scripts' default 22, were silently clamped to 16 by
+Kaskade. The geometric driver also used float32 transfer slots. Their default
+solver was **steepest descent**, despite some historical documentation calling
+it CG. `--tol` compared an internal correction/energy quantity, and exhaustion
+of the iteration limit could still exit successfully. Historical bit-depth
+labels and convergence claims must therefore be checked against their source
+and executable versions; old 24/32/48/64 labels do not establish those precisions.
+
+Both drivers now use **uint32 symbols and double transfer slots**, validate
+requested precisions in **1..32**, and reject 48/64 rather than silently clamp.
+This changes numerical/transport behavior and invalidates direct comparisons
+of old byte ratios or results without rerunning matched configurations.
+Double slots keep every uint32 quantization symbol exactly representable;
+scale/min metadata are still float32, so 32-bit symbols do not guarantee 32-bit
+reconstruction accuracy. Quantization-only transports each symbol in an
+eight-byte slot; the full codec packs variable-length streams.
+
+The options `--useCg 1`, `--restrictionPasses N`,
+`--restrictCompressionBits N` and `--prolongateCompressionBits N` are available
+in both executables. Directional precisions default to `-1` (inherit
+`--compressionBits`). Extra passes require compression; each pass exchanges
+the remaining restriction reconstruction error while the solution stays fixed.
+Only one coarse solve and prolongation follow those exchanges.
+
+Legacy solver/stopping defaults remain **SD**, one restriction pass, and
+`--relativeTolerance 0` (use `--tol`). New diagnostics explicitly select CG and
+`--relativeTolerance 1e-7`. In true-residual mode, the read-only monitor forms
+one continuous global solution by averaging shared copies, then evaluates
+`b-A*x` with the original assembled local matrices and RHS. It counts each
+physical global DOF once and sums each owner contribution once. Zero RHS uses
+the absolute residual. A separate consistency check requires
+`||local copies - continuous copies||_2 / max(1,||x||_2) <= relativeTolerance`;
+this prevents projection from concealing a discontinuous iterate. No diagnostic
+projection is written back into the solver. Failure or iteration exhaustion
+now returns a nonzero exit code. `convergence.csv` distinguishes solver calls
+from accepted updates, and `solution.csv` stores full-precision global values.
+
+The validated full pipeline uses reversible integer graph lifting **after**
+quantization (`--graphLifting 0 --graphLiftingAfterQuantization 1`), now the
+default transform configuration. Pre-quantization lifting is rejected when
+compression is enabled without integer-after mode: its neighbor-wise transformed
+reconstruction does not match the nodal published-residual feedback. To disable
+transforms, set both options to zero. In the shell runners, `LIFTING_MODE=1` is
+the new default, `0` disables lifting, and legacy `2` is rejected by the solver.
+
+Inside the same OpenMPI container as EMI, rebuild without deleting result files:
+
+```bash
+cd /BDDC/poisson_new_scratch
+make -j1 -W bddc.cpp -W bddc-add.cpp KASKADE7=/kaskade7 MPI=1 MPICXX=mpicxx \
+  MPI_FORCE_INCLUDE="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h" \
+  MPI_INCLUDE_FLAGS="-I/usr/lib64/mpi/gcc/openmpi4/include -DMUMPS_MPI_H"
+```
+
+Start with a small matched 2-D Poisson problem (16 subdomains, sigma=1):
+
+```bash
+python3 tests/run_poisson_quantization_diagnostic.py \
+  --bits 8 12 16 24 32 --restriction-passes 1 \
+  --full-compression --ranks 8 --subres 4 --elmres 8 \
+  --tolerance 1e-7 --mpi-args="--allow-run-as-root"
+```
+
+This runs an assembled UMFPACK direct reference on one rank, uncompressed CG on
+the requested ranks, then quantization-only and integer-lifting/Huffman cases.
+The mesh, coefficient, constraints, thread counts and tolerance match in all
+cases. Failed compressed cases remain recorded while the sweep continues;
+reference/baseline failure stops the sweep. The diagnostic does **not** assert
+that any particular bit depth converges. Compare two-pass 12-bit and three-pass
+8-bit only afterward, retaining exactly the same `subres`, `elmres` and `sigma`.
+
+Each new output directory retains exact commands, binary hash, environment,
+logs, convergence histories, global solutions, metrics and a summary. Raw global
+solution errors are compared against direct and uncompressed references; no
+mean offset is removed and no hidden solution-error threshold is applied.
+Net byte savings compare **total** logical payload bytes against uncompressed
+CG, including all restriction passes and changed iteration counts. Same-rank
+delivery is included; diagnostic reductions, MPI framing, allgather replication
+and codebook training are excluded. These are validation timings, not pure MPI
+communication timings. Codec-only timers are not instrumented and are no longer
+printed as if zero represented a measured cost.
+
+The shell runners additionally expose `COMPRESSION`, `USE_CG`, `REL_TOL`,
+`RESTRICT_BITS`, `PROLONGATE_BITS` and `RESTRICTION_PASSES`. `run_case_mpi.sh`
+uses `mpirun` from PATH by default; use `MPI_LAUNCHER` to override it and
+`MPI_EXTRA_ARGS="-bootstrap fork"` only for an MPI implementation requiring it.
+The new diagnostic leaves historical Slurm campaigns and archived data alone;
+their old 48/64-bit cases and pre-quantization settings must be revised before
+submitting new jobs.
+
+Local checks (no real Poisson or MPI runs):
+
+```bash
+c++ -std=c++20 -Wall -Wextra -pedantic tests/test_poisson_validation.cpp -o /tmp/test_poisson_validation
+/tmp/test_poisson_validation
+python3 -m unittest discover -s tests -p 'test_poisson_diagnostic.py' -v
+bash -n run_case.sh run_case_mpi.sh
+```
+
+The remaining sections give individual executable options and cluster context.
+
 This directory contains two Poisson examples:
 
 - `bddc`: geometric Poisson problem with BDDC;
@@ -25,8 +129,7 @@ Use the built-in help for the exact options compiled into the executable:
 Inside the Kaskade MPI container, build the examples with:
 
 ```bash
-make clean KASKADE7=/kaskade7 MPI=1
-make -j1 KASKADE7=/kaskade7 MPI=1 MPICXX=mpicxx
+make -j1 -W bddc.cpp -W bddc-add.cpp KASKADE7=/kaskade7 MPI=1 MPICXX=mpicxx
 ```
 
 ### Cluster workflow
@@ -67,7 +170,9 @@ These options are available in both executables.
 | `--subres` | `2` | Subdomains per coordinate direction |
 | `--elmres` | `2` | Elements per subdomain and coordinate direction |
 | `--iter` | `16` | Maximum BDDC iterations |
-| `--tol` | `1e-10` | BDDC residual tolerance |
+| `--tol` | `1e-10` | Legacy internal norm tolerance; active when `relativeTolerance=0` |
+| `--relativeTolerance` | `0` | True assembled relative residual target; `0` selects legacy stopping |
+| `--useCg` | `0` | `1` selects CG, `0` selects steepest descent |
 | `--crisscross` | `1` | Use criss-cross triangulation |
 
 Example:
@@ -166,11 +271,14 @@ These options are available in both Poisson executables.
 | Option | Default | Meaning |
 | --- | ---: | --- |
 | `--compression` | `0` | Enable compressed BDDC transfer |
-| `--compressionBits` | `16` | Quantization precision |
+| `--compressionBits` | `16` | Quantization alphabet precision, 1..32 |
+| `--restrictCompressionBits` | `-1` | Restriction precision override; `-1` inherits common precision |
+| `--prolongateCompressionBits` | `-1` | Prolongation precision override; `-1` inherits common precision |
+| `--restrictionPasses` | `1` | Restriction exchanges per compressed solver update, 1..16 |
 | `--compressionMinInterfaceSize` | `0` | Minimum scalar interface size for Huffman coding; `0` encodes all interfaces |
 | `--compressionThresholdInterfaceTypes` | `4` | Interface type receiving the size threshold: `2=edge`, `4=face`, `0=all` |
-| `--graphLifting` | `1` | Enable graph-lifting transform |
-| `--graphLiftingAfterQuantization` | `0` | Apply reversible integer graph lifting after quantization |
+| `--graphLifting` | `0` | Legacy pre-quantization transform; rejected without integer-after mode |
+| `--graphLiftingAfterQuantization` | `1` | Apply reversible integer graph lifting after quantization |
 | `--huffman` | `1` | Enable Huffman coding |
 | `--bitlength` | `1` | Enable bit-length/tail encoding |
 | `--histogram` | `0` | Write compression symbol histograms below `--prefix` |
@@ -186,7 +294,7 @@ The full compression pipeline uses:
 ```bash
 --compression 1 \
 --compressionBits 16 \
---graphLifting 1 \
+--graphLifting 0 --graphLiftingAfterQuantization 1 \
 --huffman 1 \
 --bitlength 1
 ```
@@ -194,9 +302,9 @@ The full compression pipeline uses:
 The transfer pipeline is:
 
 ```text
-interface vector
+interface vector (or remaining restriction error)
 -> quantization
--> optional graph lifting before quantization, or reversible integer graph lifting after quantization
+-> optional reversible integer graph lifting after quantization
 -> bit-length encoding
 -> Huffman coding
 -> packed payload
@@ -212,15 +320,15 @@ one another.
 ```bash
 # Quantization only
 --compression 1 --compressionBits 16 \
---graphLifting 0 --huffman 0 --bitlength 0
+--graphLifting 0 --graphLiftingAfterQuantization 0 --huffman 0 --bitlength 0
 
 # Quantization plus Huffman coding
 --compression 1 --compressionBits 16 \
---graphLifting 0 --huffman 1 --bitlength 0
+--graphLifting 0 --graphLiftingAfterQuantization 0 --huffman 1 --bitlength 0
 
 # Full compression pipeline
 --compression 1 --compressionBits 16 \
---graphLifting 1 --huffman 1 --bitlength 1
+--graphLifting 0 --graphLiftingAfterQuantization 1 --huffman 1 --bitlength 1
 
 # Reversible graph lifting after quantization
 --compression 1 --compressionBits 16 \
@@ -250,7 +358,7 @@ Example for the full pipeline:
   --mpi 0 \
   --compression 1 \
   --compressionBits 16 \
-  --graphLifting 1 \
+  --graphLifting 0 --graphLiftingAfterQuantization 1 \
   --huffman 1 \
   --bitlength 1 \
   --histogram 1 \
@@ -272,12 +380,6 @@ For a direct comparison, use separate output directories:
   --graphLifting 0 --graphLiftingAfterQuantization 0 \
   --huffman 1 --bitlength 1 --zigzag 1 --vtk 0 \
   --iter 20 --prefix output/poisson-study/no-lifting
-
-# Graph lifting before quantization
-./bddc --mpi 0 --compression 1 --compressionBits 22 \
-  --graphLifting 1 --graphLiftingAfterQuantization 0 \
-  --huffman 1 --bitlength 1 --zigzag 1 --vtk 0 \
-  --iter 20 --prefix output/poisson-study/before-quantization
 
 # Graph lifting after quantization
 ./bddc --mpi 0 --compression 1 --compressionBits 22 \
@@ -366,7 +468,7 @@ baseline requires a separate CG executable or solver implementation.
   --mpi 0 \
   --compression 1 \
   --compressionBits 16 \
-  --graphLifting 1 \
+  --graphLifting 0 --graphLiftingAfterQuantization 1 \
   --huffman 1 \
   --bitlength 1 \
   --threads 2 \
@@ -402,7 +504,7 @@ mpirun --allow-run-as-root -np 2 ./bddc \
   --mpi 1 \
   --compression 1 \
   --compressionBits 16 \
-  --graphLifting 1 \
+  --graphLifting 0 --graphLiftingAfterQuantization 1 \
   --huffman 1 \
   --bitlength 1 \
   --threads 2 \

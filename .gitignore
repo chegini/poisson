@@ -6,3 +6,5 @@ gccerr.txt
 *.vtu
 *.pvtu
 *.gnu
+__pycache__/
+output/poisson-quantization-diagnostic-*/

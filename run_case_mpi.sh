@@ -2,19 +2,27 @@
 set -euo pipefail
 
 BITS=${BITS:-22}
+RESTRICT_BITS=${RESTRICT_BITS:--1}
+PROLONGATE_BITS=${PROLONGATE_BITS:--1}
+RESTRICTION_PASSES=${RESTRICTION_PASSES:-1}
+USE_CG=${USE_CG:-0}
+REL_TOL=${REL_TOL:-0}
+COMPRESSION=${COMPRESSION:-1}
 MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
 THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-4}
-LIFTING_MODE=${LIFTING_MODE:-2}
+LIFTING_MODE=${LIFTING_MODE:-1}
 ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 MPI_RANKS=${MPI_RANKS:-1}
-MPI_LAUNCHER=${MPI_LAUNCHER:-/home/htc/fchegini/opencarp_dependencies/petsc_install/bin/mpirun}
+MPI_LAUNCHER=${MPI_LAUNCHER:-mpirun}
+MPI_EXTRA_ARGS=${MPI_EXTRA_ARGS:-}
 MPI_ALLOW_ROOT=${MPI_ALLOW_ROOT:-0}
 MPI_BIND_ARGS=${MPI_BIND_ARGS:--bind-to core}
 
 MPI_ARGS=(-np "$MPI_RANKS")
 read -r -a MPI_BIND_ARRAY <<< "$MPI_BIND_ARGS"
+read -r -a MPI_EXTRA_ARRAY <<< "$MPI_EXTRA_ARGS"
 if [[ "$MPI_ALLOW_ROOT" == 1 ]]; then
   MPI_ARGS+=(--allow-run-as-root)
 fi
@@ -61,7 +69,7 @@ case "$LIFTING_MODE" in
     ;;
 esac
 
-CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_subres-${SUBRES}_elmres-${ELMRES}_bits-${BITS}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_subres-${SUBRES}_elmres-${ELMRES}_bits-${BITS}_r-${RESTRICT_BITS}_p-${PROLONGATE_BITS}_passes-${RESTRICTION_PASSES}_cg-${USE_CG}_compression-${COMPRESSION}_reltol-${REL_TOL}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
 if [[ -n "$CASE_TAG" ]]; then
   CASE="${CASE_TAG}_${CASE}"
 fi
@@ -73,10 +81,14 @@ LOG="logs/poisson-${CASE}.log"
 
 mkdir -p "$RUN" "$(dirname "$LOG")"
 
-"$MPI_LAUNCHER" "${MPI_BIND_ARRAY[@]}" -bootstrap fork "${MPI_ARGS[@]}" "$EXECUTABLE" \
+"$MPI_LAUNCHER" "${MPI_BIND_ARRAY[@]}" "${MPI_EXTRA_ARRAY[@]}" "${MPI_ARGS[@]}" "$EXECUTABLE" \
   --mpi 1 \
-  --compression 1 \
+  --compression "$COMPRESSION" \
   --compressionBits "$BITS" \
+  --restrictCompressionBits "$RESTRICT_BITS" \
+  --prolongateCompressionBits "$PROLONGATE_BITS" \
+  --restrictionPasses "$RESTRICTION_PASSES" \
+  --useCg "$USE_CG" --relativeTolerance "$REL_TOL" \
   --compressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
   --compressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
   --graphLifting "$LIFTING" \
@@ -89,7 +101,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --elmres "$ELMRES" \
   --iter "$ITER" \
   --tol "$TOL" \
-  --vtk 0 \
+  --vtk "$VTK" \
   --histogram "$HISTOGRAM" \
   --sigma "$SIGMA" \
   --interfacetypes "$INTERFACE_TYPES" \

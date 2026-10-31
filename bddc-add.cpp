@@ -293,16 +293,25 @@ int main(int argc, char** argv)
   ("mpi",         bddcOptions.mpi, false, "enable owner-only MPI BDDC")
   ("compression", bddcOptions.compression, false, "enable compressed BDDC transfers")
   ("compressionBits", bddcOptions.compressionBits, 16, "quantization bits for compression")
+  ("restrictCompressionBits", bddcOptions.restrictCompressionBits, -1, "restriction bits: -1=inherit, 1..32=override")
+  ("prolongateCompressionBits", bddcOptions.prolongateCompressionBits, -1, "prolongation bits: -1=inherit, 1..32=override")
+  ("restrictionPasses", bddcOptions.restrictionPasses, 1, "restriction exchanges per update, 1..16")
+  ("useCg", bddcOptions.useCg, false, "use CG instead of legacy steepest descent")
+  ("verbose", bddcOptions.verbose, true, "print internal iteration table")
+  ("relativeTolerance", bddcOptions.relativeTolerance, 0.0, "true global relative residual target; 0=legacy --tol")
   ("compressionMinInterfaceSize", bddcOptions.compressionMinInterfaceSize, 0, "minimum scalar interface size for compressed BDDC transfer; 0=all")
   ("compressionThresholdInterfaceTypes", bddcOptions.compressionThresholdInterfaceTypes, static_cast<int>(Kaskade::BDDC::FACE), "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
-  ("graphLifting", bddcOptions.graphLifting, true, "use graph-lifting transform")
-  ("graphLiftingAfterQuantization", bddcOptions.graphLiftingAfterQuantization, false, "apply reversible integer graph lifting after quantization")
+  ("graphLifting", bddcOptions.graphLifting, false, "legacy pre-quantization graph transform; unsupported without integer-after mode")
+  ("graphLiftingAfterQuantization", bddcOptions.graphLiftingAfterQuantization, true, "apply reversible integer graph lifting after quantization")
   ("bddcExcludeCornersFromCompression", bddcOptions.excludeCornersFromCompression, false, "exclude BDDC corner DOFs from compressed transfer payloads")
   ("huffman", bddcOptions.huffman, true, "use Huffman transfer encoding")
   ("bitlength", bddcOptions.bitlength, true, "use bit-length transfer encoding")
   ("zigzag", bddcOptions.zigzag, true, "use zigzag signed-symbol mapping")
   )) return 0;
 
+  validatePoissonOptions(bddcOptions);
+  if (n<1 || m<1 || iter<1 || !std::isfinite(tolerance) || tolerance<=0)
+    throw std::invalid_argument("subres, elmres, iter and tol must be positive");
   if (bddcOptions.mpi && vtk)
     throw std::runtime_error("--vtk 1 is not supported with --mpi 1; use --vtk 0");
   PoissonMpiSession mpiSession(argc,argv,bddcOptions.mpi);
@@ -384,22 +393,82 @@ int main(int argc, char** argv)
     matrices.push_back(&matrix);
   timer.stop("alg subdom creation");
 
+  using Vector = std::decay_t<decltype(f)>;
+  using Monitor = PoissonValidation::Monitor<Matrix,Vector>;
+  std::unique_ptr<Monitor> monitor;
+  if (bddcOptions.relativeTolerance>0)
+  {
+    PoissonValidation::Mapping mapping(subdomIndices.size());
+    std::vector<Vector const*> rhs;
+    std::vector<bool> owned;
+    MpiDomainLayout layout;
+    layout.configure(bddcOptions.mpi,n);
+    for (std::size_t i=0; i<subdomIndices.size(); ++i)
+    {
+      for (auto id: subdomIndices[i]) mapping[i].push_back(id);
+      rhs.push_back(&Fs[i]);
+      owned.push_back(layout.owns(static_cast<int>(i)));
+    }
+    monitor=std::make_unique<Monitor>(matrices,rhs,mapping,owned,
+      [&](auto& values) { poissonSum(values,bddcOptions.mpi); });
+    if (poissonMpiRankZero(bddcOptions.mpi))
+      std::cout << "Poisson global dofs: " << monitor->globalRhs().size()
+                << "\nPoisson stopping rule: ||b-A*x||_2 / ||b||_2 <= "
+                << bddcOptions.relativeTolerance
+                << " (zero RHS: absolute residual); scaled interface jump <= same tolerance\n";
+  }
+
+  bool runConverged=false;
   auto run = [&]<class Transfer>()
   {
+    auto started=std::chrono::steady_clock::now();
     using BddcSubdomain = Subdomain<1,double,double,Transfer>;
     auto subs = constructPoissonSubdomains<BddcSubdomain>(matrices,ifa,bddcOptions);
     for (int i=0; i<n; ++i)
       if (subs.has(i))
         subs[i].setRhs(Fs[i]);
     timer.start("bddc creation");
-    BDDCSolver<BddcSubdomain,decltype(subs)> bddcSolver(subs,ifa.coarseConstraints(),bddcOptions.mpi);
+    std::vector<int> activeIds(n);
+    std::iota(activeIds.begin(),activeIds.end(),0);
+    BDDCSolver<BddcSubdomain,decltype(subs)> bddcSolver(subs,ifa.coarseConstraints(),
+      activeIds,bddcOptions.useCg,bddcOptions.verbose,bddcOptions.mpi);
+    bddcSolver.setRestrictionPasses(bddcOptions.restrictionPasses);
     timer.stop("bddc creation");
     std::vector<double> resNorm;
-    for (int k=0; k<iter; ++k)
+    PoissonValidation::Sample sample;
+    std::ofstream history;
+    int accepted=0;
+    if (monitor)
+    {
+      sample=monitor->evaluate(subs);
+      runConverged=sample.converged(bddcOptions.relativeTolerance);
+      printPoissonResidual(sample,0,bddcOptions.mpi);
+      if (poissonMpiRankZero(bddcOptions.mpi))
+      {
+        std::filesystem::create_directories(prefix);
+        history.open(prefix+"/convergence.csv");
+        if (!history) throw std::runtime_error("Cannot write Poisson convergence.csv");
+        history << "solver_calls,accepted_updates,absolute_residual,rhs_norm,relative_residual,interface_jump\n"
+                << std::setprecision(17) << "0,0," << sample.absolute << ',' << sample.rhsNorm
+                << ',' << sample.relative << ',' << sample.relativeJump << '\n';
+      }
+    }
+    for (int k=0; k<iter && !runConverged; ++k)
     {
       timer.start("BDDC solve");
       resNorm.push_back(bddcSolver.solve());
       timer.stop("BDDC solve");
+      if (!bddcSolver.stopped()) ++accepted;
+      if (monitor)
+      {
+        sample=monitor->evaluate(subs);
+        runConverged=sample.converged(bddcOptions.relativeTolerance);
+        printPoissonResidual(sample,k+1,bddcOptions.mpi);
+        if (history.is_open())
+          history << k+1 << ',' << accepted << ',' << sample.absolute << ','
+                  << sample.rhsNorm << ',' << sample.relative << ',' << sample.relativeJump << '\n';
+      }
+      if (bddcSolver.stopped()) break;
       if (vtk)
       {
         ScopedTimingSection out("output");
@@ -421,12 +490,12 @@ int main(int argc, char** argv)
         u -= component<0>(uDirect); u *= -1;
         writeVTK(u,prefix+"/err-"+paddedString(k),IoOptions(),"err");
       }
-      if (resNorm.back() <= tolerance)
-        break;
+      if (!monitor)
+        runConverged=std::isfinite(resNorm.back()) && resNorm.back()<=tolerance;
     }
     if (poissonMpiRankZero(bddcOptions.mpi))
     {
-      if (resNorm.size() >= 2)
+      if (!bddcSolver.stopped() && resNorm.size() >= 2)
       {
         int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
         double older = resNorm[resNorm.size()-lookback-1];
@@ -439,12 +508,25 @@ int main(int argc, char** argv)
     }
     if (bddcOptions.compression)
       printPoissonCompressionReport(bddcSolver.compressionTraffic(),bddcOptions.mpi);
+    else
+      printPoissonUncompressedReport(bddcSolver.traffic(),bddcOptions.mpi);
+    if (monitor) savePoissonSolution(sample,prefix,bddcOptions.mpi);
+    double seconds=poissonMax(std::chrono::duration<double>(
+      std::chrono::steady_clock::now()-started).count(),bddcOptions.mpi);
+    if (poissonMpiRankZero(bddcOptions.mpi))
+      std::cout << "Poisson result: status="
+                << (runConverged ? "converged" : bddcSolver.stopped() ?
+                    (bddcSolver.stagnated() ? "stagnation" : "breakdown") : "iteration-limit")
+                << " solver=" << (bddcOptions.useCg ? "cg" : "sd")
+                << " calls=" << resNorm.size() << " accepted_updates=" << accepted
+                << " rel=" << (monitor ? sample.relative : std::numeric_limits<double>::quiet_NaN())
+                << "\nPoisson solver wall seconds: " << seconds << '\n';
     return resNorm;
   };
 
   std::vector<double> resNorm;
   if (bddcOptions.compression)
-    resNorm = run.template operator()<SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>>();
+    resNorm = run.template operator()<SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>>();
   else
     resNorm = run.template operator()<SpaceTransfer<1,double,double>>();
 
@@ -455,5 +537,5 @@ int main(int argc, char** argv)
 
   if (timing && poissonMpiRankZero(bddcOptions.mpi))
     std::cout << timer;
-  return 0;
+  return runConverged ? 0 : 2;
 }
