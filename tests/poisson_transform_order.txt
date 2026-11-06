@@ -1,0 +1,146 @@
+Transform-order validation (2026-11-06)
+=======================================
+
+The two choices are:
+  transform-first: --graphLifting 1 --graphLiftingAfterQuantization 0
+  quantize-first:  --graphLifting 0 --graphLiftingAfterQuantization 1
+Use --compression 1 and --huffman 1 --bitlength 1 --zigzag 1 for full coding.
+If both lifting switches are 1, quantize-first takes precedence, preserving
+existing campaign commands. Both switches 0 selects nodal quantization only.
+With Huffman disabled, integer lifting is bypassed; floating transform-first
+still transforms coefficients and transmits them in fixed-size slots.
+
+Mathematical and implementation distinction
+-----------------------------------------
+Transform-first reconstructs T^{-1} D(Q(T x)); quantize-first reconstructs
+D(Q(x)), because integer lifting and entropy coding invert exactly on the
+quantized symbols. D uses the same transmitted float32 scale/minimum locally
+and remotely. These maps need not give the same solution or iteration count at
+the same bit depth. In transform-first, inverse lifting propagates coefficient
+quantization error into nodal values; fewer bits are not a convergence guarantee.
+
+For floating lifting, nodes are partitioned by identical sets of neighboring
+subdomain owners (after exact-corner exclusions). Each group's graph predictor
+uses only nodes in that group. Coefficients retain nodal positions and are
+quantized once using the producer-union coefficient range. Consequently a shared
+coefficient is identical in all destination packets. The sender inverse-lifts
+its own decoded coefficients before updating published residual history or its
+own prolongation contribution. Receivers use the sender's setup plan, not their
+own possibly different local matrix graph. Setup is rebuilt after graph/corner
+changes. Participants must use the same direction/order configuration.
+
+The legacy integer-after plan and per-iteration nodal quantization remain
+unchanged. Its prediction plan is still per neighbor. Mixed R/P orders carry
+both plans during setup. The existing setup log retains its historical
+'BDDC integer lifting setup' label, but may now count both kinds of plan.
+
+Zero-preserving and grouped transform-first combinations remain rejected.
+This Poisson runner validates the affine, unsplit path. The shared transfer
+implementation now also supports experimental constant-split prolongation
+before quantization, restoring the weighted constant after inverse lifting.
+The EMI transform-order runner can select it explicitly; the Poisson and frozen
+replay runners here still use unsplit transfers.
+
+Checks and execution
+--------------------
+The Kaskade tests/bddcTransferOrder regression exercises the real transfer header
+with three overlapping owners, differing endpoint graphs, repeated restriction
+feedback and prolongation, 4/8/12/16/24/32 bits, exact corners, full coding,
+fixed-slot fallback, no/mixed/all exact corners and threshold mixtures (217
+configurations). It also checks unquantized transform
+roundtrips and 32-bit agreement with exact weighted averaging.
+
+Local macOS verification uses minimal Dune vector/Boost timer test shims; it is
+not a full Dune, MPI or PDE build. Address/undefined sanitizer execution could
+not be validated here: even an empty sanitizer program timed out in this macOS
+environment. The unsanitized production-header regression passed. Existing EMI integer-path consistency checks
+are also run to detect changes to quantization-first results. The Python runner
+test uses a fake executable only to test orchestration and result validation.
+
+On Linux, inside the Open MPI Kaskade container with /kaskade7 and /BDDC mounted:
+  cd /BDDC/poisson_new_scratch
+  bash tests/run_poisson_transform_order_check.sh
+
+The script compiles the transfer regression using real installed headers,
+rebuilds bddc, and runs fresh direct, uncompressed CG, quantization-only 16-bit,
+transform-first 16-bit and quantize-first 16-bit cases. It uses a small fixed
+mesh, 2 MPI ranks for BDDC, one thread/rank, one direct-solver rank, 300 maximum
+iterations and a true residual/continuity tolerance of 1e-7. Output goes into a
+new timestamped directory. Previous data is preserved.
+
+The summary reports iterations, residuals, logical transfer bytes, timings and
+raw coefficient L2/L-infinity errors versus direct/uncompressed solutions. The
+second successful transform order also reports its difference from the first.
+PASS requires true residual and shared-copy continuity; solution-error metrics
+are reported without an invented acceptance threshold. A missing order marker
+rejects a stale executable. Convergence failures remain failures, with logs.
+
+After rebuilding, the runner can be used independently:
+  python3 tests/run_poisson_quantization_diagnostic.py --ranks 2 --bits 16 \
+    --transform-orders before after --mpi-args=--allow-run-as-root
+
+Logical byte counters include local transfers and exclude setup/codebook/MPI
+traffic. These small validation timings include residual diagnostics and are
+not distributed-network speedup measurements. No codebook time is subtracted.
+
+Frozen identical-buffer comparison
+----------------------------------
+  bash tests/run_poisson_frozen_order_check.sh
+
+Defaults: subres=4, elmres=64, two ranks, standard CG without constant split,
+16 bits, both orders. The wrapper rebuilds bddc and runs direct/uncompressed
+references, quantization-only with capture OFF and ON, then both live orders.
+Observer parity requires identical call/byte counts, successful convergence,
+and at most 1e-12 relative changes in every recorded solution/history scalar
+(exact equality is recorded separately). Tiny nondeterministic MPI differences
+can fail this strict diagnostic; inspect observer logs instead of relaxing the
+check automatically. Synthetic tests also require bit-identical capture-on/off
+packets and identical own reconstructed values.
+
+Only the capture run sets KASKADE_FROZEN_TRANSFER_DIR. First 32 transfer calls
+per direction are saved; call numbers are not necessarily solver iterations.
+R snapshots are increments after subtracting published history, and P snapshots
+are weighted corrections before quantization. Exact-corner flags, overlapping
+producer ownership and the actual unit-weight interface graph are saved too.
+Only active scalar double, unsigned-32-symbol, affine, unsplit/ungrouped cases
+are supported. Existing files are never overwritten. No VTU parsing is used.
+
+A separate executable replays each complete captured exchange at the selected
+precision through quantization-only, transform-first and quantize-first. It
+constructs fresh producer transfers, using zero history for the already formed
+R increments and unit weights for the already weighted P buffers. Thus all
+three modes see identical inputs and topology. The real production codebook
+builder, packet writer, producer-plan exchange and decoder are used. Receivers
+must match the producer's reconstruction exactly; corners stay exact; integer
+lifting must decode identically to quantization-only. Floating transform-first
+has its own quantization error, measured rather than forced equal to nodal
+quantization. This diagnostic does not predict a whole solver trajectory.
+
+The frozen-comparison subdirectory contains:
+  packets.csv: per-packet byte breakdown, error, raw reference and plan size.
+  stages.csv: raw non-corner values, quantization inputs, quantized codes,
+              lifted codes modulo 2^32, transmitted symbols and bit lengths.
+  symbol_histograms.csv: actual packet-weighted counts (no alphabet seeding).
+  coefficient_histograms.csv: shared-bin real-value distributions by phase.
+  codebooks.csv: actual training population size and table-bit estimate/call.
+  summary.json / summary.txt: R and P separately; bytes and reconstruction error.
+
+R/P use the same setup plans: do not sum the displayed per-direction plan-size
+estimates as independent setup transfers. The codebook builder currently runs
+per exchange; one-time training is NOT assumed or subtracted from runtime.
+Plan allgather replication, codebook communication/training, MPI framing,
+validation collectives and filesystem I/O are outside payload byte counts.
+Captures include intra-rank transfers. Frozen savings use 8 bytes per scalar on
+the SAME sampled calls; live net savings still compare with the converged
+uncompressed solve. These denominators answer different questions.
+
+Before and after use existing production training populations (producer union
+versus neighbor packets), so this tests the implemented pipelines rather than
+an artificially identical Huffman table. Histograms count transmitted packet
+symbols in both cases. The offline tool is single-process and has no access to
+the live solver's shared codebooks. No solver tolerance or algorithm is changed.
+
+Local verification uses the production transfer headers with minimal Dune/
+Boost test shims on macOS. Full Linux/MPI/PDE execution must be performed with
+the wrapper in the supplied container; it compiles the same fixtures against
+the installed real headers before running Poisson.

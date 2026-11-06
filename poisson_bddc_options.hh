@@ -59,12 +59,9 @@ inline void validatePoissonOptions(PoissonBddcOptions const& options)
     throw std::invalid_argument("restrictionPasses must be 1..16; extra passes require --compression 1");
   if (!std::isfinite(options.relativeTolerance) || options.relativeTolerance<0)
     throw std::invalid_argument("relativeTolerance must be finite and nonnegative; 0 selects legacy stopping");
-  // The legacy pre-quantization transform requantizes each neighbor separately,
-  // while the published-residual accumulator tracks nodal quantization instead.
-  // Feedback must track exactly what receivers reconstruct. Integer lifting
-  // AFTER quantization preserves those symbols and their reconstruction.
-  if (options.compression && options.graphLifting && !options.graphLiftingAfterQuantization)
-    throw std::invalid_argument("Graph lifting before quantization is not supported by the validated feedback path; use --graphLifting 0 --graphLiftingAfterQuantization 1, or disable both transforms");
+  // Both orders use producer-owned plans and matching local reconstruction.
+  // If both switches are set, integer-after mode takes precedence for compatibility.
+
 }
 
 inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& options)

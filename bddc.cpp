@@ -352,7 +352,7 @@ int main(int argc, char** argv)
   ("direct", direct, false, "solve assembled global problem with UMFPACK for validation")
   ("compressionMinInterfaceSize", bddcOptions.compressionMinInterfaceSize, 0, "minimum scalar interface size for compressed BDDC transfer; 0=all")
   ("compressionThresholdInterfaceTypes", bddcOptions.compressionThresholdInterfaceTypes, static_cast<int>(Kaskade::BDDC::FACE), "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
-  ("graphLifting", bddcOptions.graphLifting, false, "legacy pre-quantization graph transform; unsupported without integer-after mode")
+  ("graphLifting", bddcOptions.graphLifting, false, "graph lifting before quantization (set graphLiftingAfterQuantization=0)")
   ("graphLiftingAfterQuantization", bddcOptions.graphLiftingAfterQuantization, true, "apply reversible integer graph lifting after quantization")
   ("bddcExcludeCornersFromCompression", bddcOptions.excludeCornersFromCompression, false, "exclude BDDC corner DOFs from compressed transfer payloads")
   ("huffman", bddcOptions.huffman, true, "use Huffman transfer encoding")
@@ -370,6 +370,14 @@ int main(int argc, char** argv)
   if (bddcOptions.mpi && vtk)
     throw std::runtime_error("--vtk 1 is not supported with --mpi 1; use --vtk 0");
   PoissonMpiSession mpiSession(argc,argv,bddcOptions.mpi);
+  if (poissonMpiRankZero(bddcOptions.mpi))
+    std::cout << "Poisson compression order: "
+              << (!bddcOptions.compression ? "uncompressed" :
+                  bddcOptions.graphLiftingAfterQuantization && bddcOptions.huffman
+                    ? "quantize-first" : bddcOptions.graphLifting &&
+                       !bddcOptions.graphLiftingAfterQuantization
+                    ? "transform-first" : "quantization-only") << '\n';
+
 
   if (threads >= 0)
     NumaThreadPool::instance(threads);

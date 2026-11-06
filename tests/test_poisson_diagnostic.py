@@ -24,6 +24,9 @@ a=sys.argv[1:]
 def value(key): return a[a.index(key)+1]
 with open('capture.jsonl','a') as stream: stream.write(json.dumps(a)+'\\n')
 out=Path(value('--prefix'))
+if os.environ.get('KASKADE_FROZEN_TRANSFER_DIR'):
+ capture=Path(os.environ['KASKADE_FROZEN_TRANSFER_DIR'])
+ (capture/'mock.buffer').write_text('fake MPI input')
 direct=value('--direct')=='1'
 compressed=value('--compression')=='1'
 full=value('--huffman')=='1'
@@ -41,6 +44,8 @@ if not direct:
  print('Poisson solver wall seconds: 1.5')
 with (out/'solution.csv').open('w') as stream:
  w=csv.writer(stream); w.writerow(['global_dof','value']); w.writerows([[0,1],[1,2]])
+order='uncompressed' if not compressed else 'transform-first' if value('--graphLifting')=='1' else 'quantize-first' if value('--graphLiftingAfterQuantization')=='1' else 'quantization-only'
+print('Poisson compression order: '+order)
 print(f"Poisson result: status={'breakdown' if bad else 'converged'} solver={solver} calls={calls} rel={relative}")
 sys.exit(2 if bad or (direct and os.environ.get('FAIL_DIRECT')=='1') else 0)
 ''')
@@ -73,6 +78,45 @@ sys.exit(2 if bad or (direct and os.environ.get('FAIL_DIRECT')=='1') else 0)
             refined_calls = [json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-6:]
             self.assertEqual([a[a.index('--restrictionPasses')+1] for a in refined_calls],
                              ['1','1','2','2','2','2'])
+            selected = [arg for arg in common if arg!='--full-compression']
+            paired = subprocess.run(selected+['--bits','16','--transform-orders','before','after',
+                                              '--output','orders'],cwd=repo,capture_output=True,text=True)
+            self.assertEqual(paired.returncode,0,paired.stdout+paired.stderr)
+            order_rows=json.loads((repo/'orders/summary.json').read_text())
+            self.assertEqual([row['case'] for row in order_rows],
+                             ['direct','uncompressed-cg','quantization-16','before-16','after-16'])
+            self.assertEqual(order_rows[-1]['comparison_to_before']['relative_l2'],0)
+            order_commands=[json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-2:]
+            for command,before,after in zip(order_commands,['1','0'],['0','1']):
+                self.assertEqual(command[command.index('--graphLifting')+1],before)
+                self.assertEqual(command[command.index('--graphLiftingAfterQuantization')+1],after)
+                self.assertEqual(command[command.index('--huffman')+1],'1')
+            # Exercise opt-in capture routing and the observer gate using a fake
+            # replay executable. Production codec behavior is tested by C++ fixtures.
+            replay=repo/'fake-replay'
+            replay.write_text("""#!/usr/bin/env python3
+from pathlib import Path
+import sys
+source, dest=map(Path,sys.argv[1:3])
+assert (source/'mock.buffer').read_text()=='fake MPI input'
+dest.mkdir()
+(dest/'packets.csv').write_text('mode,phase,call,producer,peer,raw_bytes,wire_bytes,grid_bytes,framing_bytes,huffman_bytes,tail_bytes,padding_bytes,exact_bytes,slot_bytes,plan_bytes,squared_error,squared_norm,max_absolute_error\\nquantization,restrict,1,0,1,8,16,8,0,0,0,0,0,8,0,0,1,0\\n')
+(dest/'stages.csv').write_text('mode,phase,call,producer,peer,stage,position,value\\nquantization,restrict,1,0,1,symbols,0,1\\n')
+(dest/'codebooks.csv').write_text('mode,phase,call,training_symbols,estimated_table_bits\\nquantization,restrict,1,0,0\\n')
+""")
+            replay.chmod(0o755)
+            frozen=subprocess.run(selected+['--bits','16','--transform-orders','before','after',
+                '--frozen-replay-executable',str(replay),'--output','frozen'],
+                cwd=repo,capture_output=True,text=True)
+            self.assertEqual(frozen.returncode,0,frozen.stdout+frozen.stderr)
+            frozen_root=repo/'frozen'
+            self.assertTrue(json.loads((frozen_root/'capture-16/observer-parity.json').read_text())['passed'])
+            for name in ('direct','uncompressed-cg','quantization-16','before-16','after-16'):
+                self.assertNotIn('KASKADE_FROZEN_TRANSFER_DIR',
+                    json.loads((frozen_root/name/'run-environment.json').read_text()))
+            self.assertIn('KASKADE_FROZEN_TRANSFER_DIR',
+                json.loads((frozen_root/'capture-16/run-environment.json').read_text()))
+            self.assertTrue((frozen_root/'frozen-comparison/summary.json').is_file())
             invalid = subprocess.run(common+['--output','invalid','--bits','48'],cwd=repo,
                                      capture_output=True,text=True)
             self.assertEqual(invalid.returncode,2)

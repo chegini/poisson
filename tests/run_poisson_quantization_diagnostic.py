@@ -51,9 +51,14 @@ def main():
     parser.add_argument('--iterations', type=int, default=300)
     parser.add_argument('--use-cg', type=int, choices=[0,1], default=1)
     parser.add_argument('--full-compression', action='store_true')
+    parser.add_argument('--transform-orders', nargs='+', choices=['before','after'],
+                        help='Matched full-codec comparisons; before=transform then quantize, after=quantize then integer lift')
     parser.add_argument('--launcher', default=os.environ.get('MPIEXEC','mpirun'))
     parser.add_argument('--mpi-args', default='')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--frozen-replay-executable', type=Path,
+                        help='Opt-in identical-buffer replay; requires one bit depth')
+
     args = parser.parse_args()
     if not args.bits or len(set(args.bits))!=len(args.bits) or any(b<1 or b>32 for b in args.bits):
         parser.error('--bits must be distinct integers in 1..32; 48/64 are unsupported')
@@ -63,6 +68,15 @@ def main():
         parser.error('ranks, subres, elmres and iterations must be positive')
     if not all(math.isfinite(v) and v>0 for v in [args.sigma,args.tolerance]):
         parser.error('sigma and tolerance must be finite and positive')
+    if args.transform_orders and (args.full_compression or
+                                  len(set(args.transform_orders))!=len(args.transform_orders)):
+        parser.error('Use distinct --transform-orders; do not combine with --full-compression')
+    if args.frozen_replay_executable:
+        if len(args.bits)!=1 or args.restriction_passes!=1 or args.use_cg!=1:
+            parser.error('Frozen comparison requires one bit depth, one R pass, and CG')
+        args.frozen_replay_executable=args.frozen_replay_executable.resolve()
+        if not os.access(args.frozen_replay_executable,os.X_OK):
+            parser.error('Frozen replay executable is missing')
     launcher = shlex.split(args.launcher)+shlex.split(args.mpi_args)
     if not shlex.split(args.launcher):
         parser.error('MPI launcher is empty')
@@ -82,8 +96,25 @@ def main():
                     byte_scope='logical transfer payloads; excludes diagnostic collectives and MPI/codebook overhead',
                     solution_comparison='raw global coefficients; no mean offset removed',
                     timings='validation runs include true-residual checks and CSV output; not pure communication timings')
+    if args.frozen_replay_executable:
+        metadata['frozen_replay_sha256']=hashlib.sha256(
+            args.frozen_replay_executable.read_bytes()).hexdigest()
+    if args.transform_orders:
+        source_files=[repo/'bddc.cpp',repo/'poisson_bddc_options.hh',Path(__file__).resolve()]
+        kaskade=Path(os.environ.get('KASKADE7','/kaskade7'))
+        source_files += [kaskade/'mg'/name for name in
+                         ('bddc.hpp','bddcSpaceTransfer.hh','bddcSpaceTransfer.hpp','bddcLiftingPlan.hh','bddcFrozenTransfer.hpp')]
+        if args.frozen_replay_executable:
+            source_files += [repo/'tests'/name for name in
+                             ('compare_frozen_transfers.cpp','summarize_frozen_transfers.py',
+                              'run_poisson_frozen_order_check.sh')]
+        metadata['source_sha256']={str(path):hashlib.sha256(path.read_bytes()).hexdigest()
+                                   for path in source_files if path.is_file()}
     (root/'environment.json').write_text(json.dumps(metadata,default=str,indent=2)+'\n')
     env = dict(os.environ,OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
+    # Captures are assigned to one particular run below, never inherited by all cases.
+    env.pop('KASKADE_FROZEN_TRANSFER_DIR',None)
+
     common = [str(executable),'--mpi','1','--threads','1','--vtk','0','--timing','0',
               '--subres',str(args.subres),'--elmres',str(args.elmres),'--sigma',str(args.sigma),
               '--crisscross','1','--interfacetypes','7','--iter',str(args.iterations),
@@ -112,28 +143,42 @@ def main():
                   'Validation timings include residual checks and CSV output; repeat separately for performance claims.']
         (root/'summary.txt').write_text('\n'.join(lines)+'\n')
 
-    def run(name, bits=None, direct=False, full=False):
+    def run(name, bits=None, direct=False, full=False, order=None, frozen=False):
         folder = root/name
         folder.mkdir()
         passes = args.restriction_passes if bits is not None else 1
-        coding = '1' if full else '0'
+        coding = '1' if full or order else '0'
+        before = order=='before'
         command = launcher+['-np',str(1 if direct else args.ranks)]+common+[
             '--direct',str(int(direct)),'--compression',str(int(bits is not None)),
             '--compressionBits',str(bits if bits is not None else 32),
             '--restrictCompressionBits',str(bits if bits is not None else 32),
             '--prolongateCompressionBits',str(bits if bits is not None else 32),
-            '--restrictionPasses',str(passes),'--graphLifting','0',
-            '--graphLiftingAfterQuantization',coding,'--huffman',coding,
+            '--restrictionPasses',str(passes),'--graphLifting',str(int(before)),
+            '--graphLiftingAfterQuantization','0' if before else coding,'--huffman',coding,
             '--bitlength',coding,'--zigzag',coding,'--prefix',str(folder)]
         (folder/'command.sh').write_text(shlex.join(command)+'\n')
         print('Running '+name+' ...',flush=True)
+        run_env=env.copy()
+        if frozen:
+            capture=folder/'frozen-inputs'
+            capture.mkdir()
+            run_env['KASKADE_FROZEN_TRANSFER_DIR']=str(capture)
+        (folder/'run-environment.json').write_text(json.dumps(
+            {k:v for k,v in run_env.items() if k in
+             ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','KASKADE_FROZEN_TRANSFER_DIR')},
+            indent=2)+'\n')
         started = time.monotonic()
         with (folder/'run.log').open('w') as stream:
-            result = subprocess.run(command,cwd=repo,env=env,stdout=stream,stderr=subprocess.STDOUT)
-        row = dict(case=name,status='FAIL',bits=bits,passes=passes,return_code=result.returncode,
+            result = subprocess.run(command,cwd=repo,env=run_env,stdout=stream,stderr=subprocess.STDOUT)
+        row = dict(case=name,status='FAIL',bits=bits,passes=passes,transform_order=order,return_code=result.returncode,
                    elapsed_seconds=time.monotonic()-started,log=str(folder/'run.log'))
         text = (folder/'run.log').read_text(errors='replace')
         try:
+            if order:
+                expected_order='transform-first' if before else 'quantize-first'
+                if re.findall(r'^Poisson compression order: (.*)$',text,re.M)!=[expected_order]:
+                    raise ValueError('Missing/wrong compression order marker; rebuild the executable')
             matches = re.findall(r'Poisson result: status=(\S+) solver=(\S+) calls=(\d+)(?: accepted_updates=\d+)? rel=(\S+)',text)
             if len(matches)!=1: raise ValueError('Missing/duplicate final result')
             status, solver, calls, relative = matches[0]
@@ -175,6 +220,11 @@ def main():
                     references['bytes'] = row['bytes']
                 else:
                     row['comparison_to_uncompressed'] = compare(solution,references['uncompressed'])
+                if order:
+                    references[(bits,order)] = solution
+                    other='after' if before else 'before'
+                    if (bits,other) in references:
+                        row['comparison_to_'+other] = compare(solution,references[(bits,other)])
                 if references['bytes']:
                     row['net_saved_percent'] = 100*(1-row['bytes']/references['bytes'])
             row['status'] = 'PASS'
@@ -190,8 +240,33 @@ def main():
     if not run('direct',direct=True) or not run('uncompressed-cg' if args.use_cg else 'uncompressed-sd'):
         print('Stopped: inspect the reference/baseline logs.'); return 1
     for bits in args.bits:
-        run(f'quantization-{bits}',bits=bits)
+        quantization_ok=run(f'quantization-{bits}',bits=bits)
+        if args.frozen_replay_executable:
+            if not quantization_ok or not run(f'capture-{bits}',bits=bits,frozen=True):
+                print('Stopped: frozen input trajectory did not pass.'); return 1
+            from summarize_frozen_transfers import verify_observer, summarize
+            control=root/f'quantization-{bits}'
+            observed=root/f'capture-{bits}'
+            try:
+                parity=verify_observer(control,observed)
+                (observed/'observer-parity.json').write_text(json.dumps(parity,indent=2)+'\n')
+                captures=sorted((observed/'frozen-inputs').glob('*.buffer'))
+                if not captures:
+                    raise ValueError('No frozen buffers; rebuild the updated transfer header')
+                (observed/'capture-sha256.json').write_text(json.dumps(
+                    {f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in captures},
+                    indent=2)+'\n')
+                replay_command=[str(args.frozen_replay_executable),
+                                str(observed/'frozen-inputs'),str(root/'frozen-comparison'),str(bits)]
+                (root/'frozen-replay-command.sh').write_text(shlex.join(replay_command)+'\n')
+                subprocess.run(replay_command,cwd=repo,env=env,check=True)
+                summarize(root/'frozen-comparison')
+            except (ValueError,OSError,subprocess.CalledProcessError) as error:
+                print('Frozen comparison FAILED: '+str(error)); return 1
+
         if args.full_compression: run(f'full-{bits}',bits=bits,full=True)
+        for order in args.transform_orders or []:
+            run(f'{order}-{bits}',bits=bits,order=order)
     print('\n'+(root/'summary.txt').read_text())
     print('Summary and logs: '+str(root))
     return int(any(row['status']!='PASS' for row in records))
