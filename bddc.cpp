@@ -25,6 +25,8 @@ using namespace Kaskade;
 #include "mg/bddc.hpp"
 #include "poisson_bddc_options.hh"
 #include "poisson_fgmres_mpi.hh"
+#include "poisson_geometry.hh"
+#include "poisson_vtk.hh"
 
 // ------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------
@@ -71,16 +73,11 @@ public:
       du = vars.template derivative<0>(evaluators);
       auto z = cell.geometry().global(xi);
 
-      // Create manufactured solution u = x^2 * (1-x) * y^2 * (1-y).
-      // - Laplace of u is -u_xx - u_yy as written below.
-      double x = z[0];
-      double y = z[1];
-      f = - (2-6*x)*y*y*(1-y) - x*x*(1-x)*(2-6*y);
-
-      if (x>=0.5 && y>=0.5)
-        sigma = sigma0;
-      else
-        sigma = 1;
+      // u = product_d x_d^2 (1-x_d), exact for sigma=1 before the boundary penalty.
+      f = PoissonGeometry::source<dim>(z);
+      bool upperCorner=true;
+      for (int d=0; d<dim; ++d) upperCorner=upperCorner && z[d]>=0.5;
+      sigma = upperCorner ? sigma0 : 1;
     }
 
     Scalar d0() const
@@ -130,8 +127,7 @@ public:
     {
       u = vars.template value<0>(evaluators);
       auto x = face.geometry().global(xi);
-      penalty = (   x[0]<=1e-10 || x[0]>=1-1e-9                // domain boundary: Dirichlet penalty
-                 || x[1]<=1e-10 || x[1]>=1-1e-9) ? 1e8: 0.0;
+      penalty = PoissonGeometry::outerBoundary<dim>(x) ? 1e8 : 0.0;
     }
 
     Scalar d0() const
@@ -186,7 +182,8 @@ public:
     else
     {
       int stiffnessMatrixIntegrationOrder = 2*(shapeFunctionOrder-1);
-      int sourceTermIntegrationOrder = shapeFunctionOrder;        // as rhs f is constant, i.e. of order 0
+      // Keep the historical 2D discretization; the 3D polynomial source has degree 7.
+      int sourceTermIntegrationOrder = dim==3 ? 7+shapeFunctionOrder : shapeFunctionOrder;
 
       return std::max(stiffnessMatrixIntegrationOrder,sourceTermIntegrationOrder);
     }
@@ -197,11 +194,11 @@ private:
 };
 
 
+template<int dim>
 class MySubdomain
 {
-  constexpr static int dim = 2;
   using Grid = Dune::UGGrid<dim>;
-  using GridView = Grid::LeafGridView;
+  using GridView = typename Grid::LeafGridView;
   using GridMan = Kaskade::GridManager<Grid>;
 
 public:
@@ -209,8 +206,8 @@ public:
   using Matrix = Kaskade::NumaBCRSMatrix<Dune::FieldMatrix<double,1,1>>;
   using Vector = Dune::BlockVector<Dune::FieldVector<double,1>>;
 
-  MySubdomain(Dune::FieldVector<double,2> bl_,
-              Dune::FieldVector<double,2> tr_,
+  MySubdomain(Dune::FieldVector<double,dim> bl_,
+              Dune::FieldVector<double,dim> tr_,
               double dx, bool symmetricGrid)
   : bl(bl_)
   , tr(tr_)
@@ -251,10 +248,9 @@ public:
     for (auto const& v: Dune::vertices(gridView))
     {
       auto x = v.geometry().center();
-      if (   x[0]<=bl[0]+1e-10 || x[0]>=tr[0]-1e-10                 // Check if vertex is on the boundary of
-          || x[1]<=bl[1]+1e-10 || x[1]>=tr[1]-1e-10 )               // the rectangle (given by [bl,tr]).
-        bdryVertices.push_back({gridView.indexSet().index(v),x});   // Find index based on P1 assumption:
-    }                                                               // dof indexing equals vertex indexing.
+      if (PoissonGeometry::localBoundary<dim>(x,bl,tr))
+        bdryVertices.push_back({gridView.indexSet().index(v),x});
+    } // P1 DOF indexing equals vertex indexing.
   }
 
   Matrix const& matrix() const
@@ -267,6 +263,8 @@ public:
     return f;
   }
 
+  auto gridView() const { return h1Space->gridView(); }
+
   void write(Vector const& u_, std::string const& filename) const
   {
     auto u = h1Space->template element<1>();
@@ -274,19 +272,19 @@ public:
     writeVTK(u,filename,IoOptions(),"sol");
   }
   
-  std::vector<std::pair<int,Dune::FieldVector<double,2>>> const& boundaryNodes() const
+  std::vector<std::pair<int,Dune::FieldVector<double,dim>>> const& boundaryNodes() const
   {
     return bdryVertices;
   }
 
 
 private:
-  Dune::FieldVector<double,2> bl, tr;
+  Dune::FieldVector<double,dim> bl, tr;
   std::unique_ptr<GridMan> gridman;
   std::unique_ptr<H1Space<Grid>> h1Space;
   Matrix A;
   Vector f;
-  std::vector<std::pair<int,Dune::FieldVector<double,2>>> bdryVertices;
+  std::vector<std::pair<int,Dune::FieldVector<double,dim>>> bdryVertices;
 };
 
 
@@ -320,7 +318,7 @@ void writeParallelVTK(std::ostream& out,
 int main(int argc, char** argv)
 {
   using namespace Kaskade::BDDC;
-  int const dim = 2;
+  int dimension;
 
 
   int iter, interfaceTypes, n, m, threads;
@@ -330,6 +328,7 @@ int main(int argc, char** argv)
   double sigma, tolerance;
   std::string prefix;
   if (getKaskadeOptions(argc,argv,Options
+  ("dimension", dimension, 2, "spatial dimension: 2 or 3")
   ("prefix",      prefix,         ".","output path for vtu files")
   ("timing",     timing,         true,"whether to write timing info")
   ("vtk",           vtk,         true,"write VTK output")
@@ -340,7 +339,7 @@ int main(int argc, char** argv)
   ("tol",       tolerance,       1e-10,"BDDC residual tolerance")
   ("crisscross", symmetricGrid,  true,"meshing with criss-cross grid")
   ("interfacetypes",interfaceTypes, 7,"bit flags for coarse interfaces to include: 1 corner 2 edge 4 face")
-  ("sigma",      sigma,        1.0,   "diffusion constant to be used in top right corner [0.5,1]^2")
+  ("sigma",      sigma,        1.0,   "diffusion constant in the upper corner [0.5,1]^dimension")
   ("mpi",         bddcOptions.mpi, false, "enable owner-only MPI BDDC")
   ("compression", bddcOptions.compression, false, "enable compressed BDDC transfers")
   ("compressionBits", bddcOptions.compressionBits, 16, "quantization bits for compression")
@@ -371,16 +370,16 @@ int main(int argc, char** argv)
   )) return 0;
 
   validatePoissonOptions(bddcOptions);
+  int const N = PoissonGeometry::subdomainCount(n,dimension);
   if (n<1 || m<1 || iter<1 || !std::isfinite(sigma) || sigma<=0 ||
       !std::isfinite(tolerance) || tolerance<=0)
     throw std::invalid_argument("subres, elmres, iter, sigma and tol must be positive");
   if (direct && bddcOptions.relativeTolerance<=0)
     throw std::invalid_argument("--direct requires --relativeTolerance > 0");
-  if (bddcOptions.mpi && vtk)
-    throw std::runtime_error("--vtk 1 is not supported with --mpi 1; use --vtk 0");
-  if ((bddcOptions.fgmres && vtk) ||
-      (histogram && (bddcOptions.localCompressionBypass || bddcOptions.fgmres || bddcOptions.constantSplit)))
-    throw std::invalid_argument("FGMRES requires vtk=0; bypass/FGMRES/split validation requires histogram=0");
+  if (bddcOptions.mpi && vtk && bddcOptions.relativeTolerance<=0)
+    throw std::invalid_argument("MPI VTK output requires --relativeTolerance > 0");
+  if (histogram && (bddcOptions.localCompressionBypass || bddcOptions.fgmres || bddcOptions.constantSplit))
+    throw std::invalid_argument("Bypass/FGMRES/split validation requires histogram=0");
   PoissonMpiSession mpiSession(argc,argv,bddcOptions.mpi);
   if (poissonMpiRankZero(bddcOptions.mpi))
     std::cout << "Poisson compression order: "
@@ -404,24 +403,23 @@ int main(int argc, char** argv)
   if (threads >= 0)
     NumaThreadPool::instance(threads);
 
+  if (poissonMpiRankZero(bddcOptions.mpi))
+    std::cout << "Poisson geometry: dimension=" << dimension << " subdomains=" << N << '\n';
+
+  auto solveDimension = [&]<int dim>() -> int {
   auto& timer = Timings::instance();
-  
-  int const N = n*n; // number of subdomains
 
-  // Subdivide the unit square into n x n square subdomains, sonsisting of m x m squares subdivided into triangles.
-  // We subdivide grid creation (on construction) and space creation/assembly since UG grid creation is not
-  // thread-safe. So grids are created sequentially (what is a pity, because that's excessively slow) and
-  // the remaining Kaskade part of the initialization is done in parallel.
+  // Tensor partition of the unit square/cube. Grid creation is sequential (UG).
   timer.start("FE grid creation");
-  std::vector<MySubdomain> subdomains;
-  for (int i=0; i<n; ++i)
-    for (int j=0; j<n; ++j)
-    {
-      Dune::FieldVector<double,dim> bl{(double)i/n,(double)j/n}, tr{(i+1.0)/n,(j+1.0)/n};
-      double dx = 1.0/(n*m);
-
-      subdomains.push_back(MySubdomain(bl,tr,dx,symmetricGrid));
-    }
+  std::vector<MySubdomain<dim>> subdomains;
+  for (int id=0; id<N; ++id)
+  {
+    auto indices=PoissonGeometry::coordinates<dim>(id,n);
+    Dune::FieldVector<double,dim> bl, tr;
+    for (int d=0; d<dim; ++d) { bl[d]=double(indices[d])/n; tr[d]=(indices[d]+1.0)/n; }
+    double dx = 1.0/(double(n)*m);
+    subdomains.emplace_back(bl,tr,dx,symmetricGrid);
+  }
   timer.stop("FE grid creation");
 
   timer.start("subdom creation");
@@ -435,12 +433,8 @@ int main(int argc, char** argv)
 
   // Lexical comparison of floating point vectors - admitting some leeway for roundoff
   auto fpless = [](auto const& x, auto const& y)
-  {
-    if (x[0]+1e-10 < y[0]) return true;
-    if (x[0] > y[0]+1e-10) return false;
-    return x[1]+1e-10 < y[1];
-  };
-  
+  { return PoissonGeometry::positionLess<dim>(x,y); };
+
   timer.start("interface creation");
   // register local dofs by their spatial node position
   std::map<Dune::FieldVector<double,dim>,std::vector<BDDC::LocalDof>,
@@ -474,7 +468,7 @@ int main(int argc, char** argv)
     matrices.push_back(&subdomain.matrix());
   timer.stop("alg subdom creation");
 
-  using Vector = MySubdomain::Vector;
+  using Vector = typename MySubdomain<dim>::Vector;
   using Monitor = PoissonValidation::Monitor<Matrix,Vector>;
   std::unique_ptr<Monitor> monitor;
   PoissonValidation::Mapping mapping;
@@ -497,6 +491,52 @@ int main(int argc, char** argv)
                 << "\nPoisson stopping rule: ||b-A*x||_2 / ||b||_2 <= "
                 << bddcOptions.relativeTolerance << " (zero RHS: absolute residual); scaled interface jump <= same tolerance\n";
   }
+  // The diagnostic global solution is already replicated. Export it read-only,
+  // with the same global numbering as solution.csv, rather than accessing remote subdomains.
+  auto writeFinalVtk = [&](PoissonValidation::Sample const& sample) {
+    if (!vtk) return;
+    std::vector<double> errors(1,0);
+    if (poissonMpiRankZero(bddcOptions.mpi)) {
+      try {
+        std::vector<std::array<double,3>> points(sample.solution.size());
+        std::vector<bool> visited(points.size(),false);
+        std::size_t cells=0;
+        for (int s=0;s<N;++s) {
+          auto view=subdomains[s].gridView(); cells+=view.size(0);
+          for (auto const& vertex:Dune::vertices(view)) {
+            auto id=mapping[s].at(view.indexSet().index(vertex));
+            auto x=vertex.geometry().center();
+            for (int d=0;d<dim;++d) {
+              if (visited[id] && std::abs(points[id][d]-x[d])>1e-10)
+                throw std::runtime_error("VTK shared-DOF coordinates disagree");
+              points[id][d]=x[d];
+            }
+            visited[id]=true;
+          }
+        }
+        if (std::find(visited.begin(),visited.end(),false)!=visited.end())
+          throw std::runtime_error("VTK missing global DOF coordinates");
+        auto visitCells=[&](auto visit) {
+          for (int s=0;s<N;++s) {
+            auto view=subdomains[s].gridView();
+            for (auto const& cell:Dune::elements(view)) {
+              if (!cell.type().isSimplex()) throw std::runtime_error("VTK expects simplex cells");
+              std::array<std::size_t,dim+1> ids;
+              for (int k=0;k<dim+1;++k) ids[k]=mapping[s].at(view.indexSet().subIndex(cell,k,dim));
+              visit(ids,s);
+            }
+          }
+        };
+        auto file=std::filesystem::path(prefix)/"solution.vtu";
+        PoissonVtk::write(file,dim,points,sample.solution,cells,visitCells);
+        std::cout << "Poisson VTK file: " << file.string() << '\n';
+      } catch (std::exception const& e) {
+        std::cerr << "Poisson VTK export failed: " << e.what() << '\n'; errors[0]=1;
+      }
+    }
+    poissonSum(errors,bddcOptions.mpi);
+    if (errors[0]) throw std::runtime_error("Poisson VTK export failed on root");
+  };
   if (direct)
   {
     auto x=solvePoissonDirect<Matrix,Vector>(matrices,mapping,monitor->globalRhs(),bddcOptions.mpi);
@@ -504,6 +544,7 @@ int main(int argc, char** argv)
     printPoissonResidual(sample,0,bddcOptions.mpi);
     savePoissonSolution(sample,prefix,bddcOptions.mpi);
     bool ok=sample.converged(bddcOptions.relativeTolerance);
+    if (ok) writeFinalVtk(sample);
     if (poissonMpiRankZero(bddcOptions.mpi))
       std::cout << "Poisson result: status=" << (ok ? "converged" : "not-converged")
                 << " solver=direct calls=0 rel=" << sample.relative << '\n';
@@ -652,7 +693,7 @@ int main(int argc, char** argv)
         }
         break;
       }
-      if (vtk)
+      if (vtk && !monitor)
       {
         ScopedTimingSection out("output");
         std::vector<std::string> files, filesCorr, filesRaw, filesRes, filesRestricted;
@@ -701,7 +742,10 @@ int main(int argc, char** argv)
       printPoissonCompressionReport(bddcSolver.compressionTraffic(),bddcOptions.mpi);
     else
       printPoissonUncompressedReport(bddcSolver.traffic(),bddcOptions.mpi);
-    if (monitor) savePoissonSolution(sample,prefix,bddcOptions.mpi);
+    if (monitor) {
+      savePoissonSolution(sample,prefix,bddcOptions.mpi);
+      if (runConverged) writeFinalVtk(sample);
+    }
     double seconds=poissonMax(std::chrono::duration<double>(
       std::chrono::steady_clock::now()-started).count(),bddcOptions.mpi);
     if (poissonMpiRankZero(bddcOptions.mpi))
@@ -727,4 +771,7 @@ int main(int argc, char** argv)
     std::cout << timer;
 
   return runConverged ? 0 : 2;
+  };
+  return dimension==3 ? solveDimension.template operator()<3>()
+                      : solveDimension.template operator()<2>();
 }

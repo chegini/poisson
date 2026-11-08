@@ -32,6 +32,31 @@ class SolverCampaign(unittest.TestCase):
         direct=check.command(a,check.plan(a)[0],Path('/tmp/result'))
         self.assertIn('--nodes=1',direct);self.assertIn('--ntasks=1',direct)
 
+    def test_full_compression_only_3d_plan(self):
+        a=check.arguments(['--dimension','3','--subres','2','--elmres','4','--bits','12',
+            '--transform-orders','before','after','both','--check-routing','--check-local-bypass',
+            '--no-check-routing','--no-check-local-bypass'])
+        modes=check.plan(a)
+        self.assertEqual(len(modes),13)
+        self.assertTrue(all(m['route'] in ('direct','destination') for m in modes))
+        self.assertEqual(sum(m['bits']==12 for m in modes),9)
+        cmd=check.command(a,modes[-1],Path('/tmp/three-dimensional'))
+        self.assertEqual(cmd[cmd.index('--dimension')+1],'3')
+
+    def test_fcg_vtk_plan(self):
+        a=check.arguments(['--dimension','3','--subres','2','--elmres','4','--bits','12',
+            '--solvers','fcg','--transform-orders','before','--vtk','1',
+            '--no-check-routing','--no-check-local-bypass'])
+        modes=check.plan(a)
+        self.assertEqual([m['name'] for m in modes],
+            ['direct','fcg-uncompressed-destination','fcg-before-12-destination'])
+        for mode in modes:
+            cmd=check.command(a,mode,Path('/tmp/vtk-case'))
+            self.assertEqual(cmd[cmd.index('--vtk')+1],'1')
+        a=check.arguments([])
+        cmd=check.command(a,check.plan(a)[0],Path('/tmp/no-vtk'))
+        self.assertEqual(cmd[cmd.index('--vtk')+1],'0')
+
     def test_topology_and_traffic_rejections(self):
         text='BDDC MPI routing: destination; shared-memory domains=1; rank leaders= 0 0; compression policy=unchanged\n'
         text+='\n'.join(f'BDDC routed payload: phase={p} route={r} bytes={b} packets={int(b>0)}'
@@ -56,7 +81,10 @@ bad=os.environ.get('BAD_REFERENCE') and not direct and not compressed
 rel=0.1 if bad else 1e-9
 calls=0 if direct else 4
 with (out/'solution.csv').open('w') as f:
- w=csv.writer(f);w.writerow(['global_dof','value']);w.writerows([[0,1],[1,2]])
+ w=csv.writer(f);w.writerow(['global_dof','value'])
+ dim=int(v('--dimension'));axis=int(v('--subres'))*int(v('--elmres'))
+ count=(axis+1)**dim+axis**dim+(3*axis*axis*(axis+1) if dim==3 else 0)
+ w.writerows((i,i+1) for i in range(count))
 if not direct:
  with (out/'convergence.csv').open('w') as f:
   w=csv.writer(f);w.writerow(['solver_calls','relative_residual','interface_jump']);w.writerow([calls,rel,0])
@@ -73,6 +101,7 @@ if not direct:
     print(f'BDDC routed payload: phase={p} route={r} bytes={b} packets={int(b>0)}')
 order='uncompressed' if not compressed else 'both' if v('--graphLiftingBothOrders')=='1' else 'transform-first' if v('--graphLifting')=='1' else 'quantize-first'
 print('Poisson compression order:',order)
+print(f"Poisson geometry: dimension={os.environ.get('BAD_DIMENSION',v('--dimension'))} subdomains={int(v('--subres'))**int(v('--dimension'))}")
 print(f'Poisson result: status=converged solver={solver} calls={calls} rel={rel}')
 ''');launcher.chmod(0o755)
             command=[sys.executable,str(Path(check.__file__)), '--repo',str(root),'--launcher',str(launcher),
@@ -88,6 +117,12 @@ print(f'Poisson result: status=converged solver={solver} calls={calls} rel={rel}
             self.assertEqual(result.returncode,1,result.stdout+result.stderr)
             rows=json.loads((root/'bad/summary.json').read_text());self.assertEqual(len(rows),2)
             self.assertEqual(rows[-1]['status'],'FAIL')
+            result=subprocess.run(command+['--dimension','3','--subres','2','--elmres','2',
+                '--output',str(root/'wrong-dimension')],env=dict(os.environ,BAD_DIMENSION='2'),capture_output=True,text=True)
+            self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+            rows=json.loads((root/'wrong-dimension/summary.json').read_text())
+            self.assertEqual(len(rows),1)
+            self.assertIn('dimension',rows[0]['reason'])
 
 
 if __name__=='__main__': unittest.main()

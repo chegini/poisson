@@ -694,3 +694,106 @@ These are single-node correctness results, not multi-node Poisson validation or
 repeated performance measurements. The two/four/eight-node batch commands above
 are the next validation stage. Solution errors remain reported quantities with
 no imposed scientific acceptance threshold.
+
+## 3D full-compression validation
+
+The geometric `bddc` driver accepts `--dimension 2` (default) or `--dimension 3`.
+3D uses a unit cube split into `subres^3` subdomains, with symmetric tetrahedral
+meshes and P1 elements. All three coordinate directions participate in boundary
+conditions and shared-DOF matching. The source is the negative Laplacian of
+`u = x^2(1-x)y^2(1-y)z^2(1-z)` for `sigma=1`; the existing outer Dirichlet penalty
+is retained. The 3D RHS uses degree-eight quadrature for P1 test functions.
+The historical 2D RHS quadrature and arithmetic are preserved.
+
+Start with **`--subres 2 --elmres 4`**, not the 2D value `--elmres 64`: 3D mesh
+storage grows cubically. The starting mesh has eight subdomains, 12,288 tetrahedra
+and 2,969 global potential DOFs. The runner checks the dimension, subdomain count
+and global DOF count so an accidentally selected 2D binary cannot pass as 3D.
+
+After rebuilding with `tests/build_poisson_cluster.sh`, submit from this directory:
+
+```bash
+mkdir -p output
+poisson_job3d=$(sbatch --parsable \
+  --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  tests/submit_poisson_solver_check.sbatch \
+  --dimension 3 --subres 2 --elmres 4 \
+  --bits 12 --solvers cg fcg fgmres --split off \
+  --transform-orders before after both \
+  --no-check-routing --no-check-local-bypass \
+  --iterations 1000)
+echo "3D Poisson job: $poisson_job3d"
+tail -n 60 -F "output/poisson-check-${poisson_job3d}.log"
+```
+
+This selects **full compression on all interfaces**, with destination routing,
+including same-node interfaces. Splitting and histograms are off. Zigzag,
+bit-length/tail coding and Huffman remain enabled. The two `--no-check-*` flags
+override the batch wrapper's broader validation defaults; they remove legacy
+routing and local-bypass cases. Direct and solver-matched uncompressed controls
+are retained for error and byte comparisons: 13 cases total, of which nine use
+12-bit compression. Select `--solvers cg` for a five-case CG-only sweep.
+
+The same `self,vader,tcp` transport with Vader single-copy disabled is used.
+FGMRES remains the root-owned validation adapter described above. Reported errors
+compare coefficient vectors with direct and uncompressed solutions, not the
+manufactured continuum solution; no scientific error threshold is imposed.
+
+3D validation on 8 November 2026: all 13 cases above passed in the existing ZIB
+Open MPI container with two ranks on one node. Raw controls used five updates;
+12-bit CG/FCG used six and 12-bit FGMRES used five. Combined/before solution and
+trace parity passed for all three solvers. All 13 corresponding 2D regression
+cases matched the pre-extension solutions and traces exactly. Seven Python tests
+and the standalone geometry test passed. This does not yet establish multi-node
+3D correctness or performance.
+
+The tested executable and full logs are preserved under
+`output/poisson-3d-validation-20261108.nMc1z6/` (`validation-3d` and
+`validation-2d-regression`). To run that exact build without replacing the primary
+`bddc` executable, add
+`--executable "$PWD/output/poisson-3d-validation-20261108.nMc1z6/bddc"`
+to the batch command above.
+
+## Final solution visualization
+
+Add `--vtk 1` to `tests/run_poisson_solver_check.py` or its batch wrapper to
+write `<case>/solution.vtu` after each converged solve. Default is `--vtk 0`.
+This requires rebuilding the executable with the VTK export support; an older
+isolated executable will not acquire it just by updating the runner.
+
+For 3D FCG, 12-bit full compression and transform-first, select:
+
+```bash
+poisson_vtk_job=$(sbatch --parsable \
+  --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  tests/submit_poisson_solver_check.sbatch \
+  --dimension 3 --subres 2 --elmres 4 \
+  --bits 12 --solvers fcg --split off --transform-orders before \
+  --no-check-routing --no-check-local-bypass --vtk 1 --iterations 1000)
+tail -n 60 -F "output/poisson-check-${poisson_vtk_job}.log"
+```
+
+There are three cases: direct, uncompressed FCG, and compressed FCG. Under the
+results directory printed in the log, open
+`fcg-before-12-destination/solution.vtu` in ParaView, click Apply, and colour by
+`u`. A Slice filter shows the interior of the cube; `subdomain` is also available
+as cell data. This is a final solution export, not an iteration animation.
+
+Rank zero writes the entire conforming triangle/tetrahedron mesh using the same
+global DOF numbering and Float64 coefficients as `solution.csv`. The runner
+checks point/cell counts and exact VTK/CSV coefficient equality. MPI ranks
+collectively report write failure. Export does not change the solver state;
+reported validation timings include export and should not be used as timing
+benchmarks. Historical serial runs without residual monitoring retain their
+per-iteration output.
+
+VTK validation on 8 November 2026: direct, uncompressed FCG and compressed FCG
+passed with two MPI ranks on one node in both 2D and 3D. All exported coefficient
+vectors and solver traces exactly matched the VTK-off runs. Mesh checks verified
+connectivity, cell types, nondegenerate cells and total area/volume one. Eight
+Python tests passed. The tested VTK-capable executable is
+`output/poisson-vtk-validation-20261108.1fEGCC/bddc`; select it with
+`--executable "$PWD/output/poisson-vtk-validation-20261108.1fEGCC/bddc"`.
+Its `validation-vtk` directory contains the three 3D examples and
+`validation-vtk-2d` contains the corresponding 2D checks. This export has not yet
+been tested across physical nodes.

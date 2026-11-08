@@ -10,6 +10,8 @@ export LANG=C LC_ALL=C OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEB
 check_dir=$(mktemp -d /tmp/poisson-check.XXXXXX)
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror tests/test_poisson_validation.cpp -o "$check_dir/validation"
 "$check_dir/validation"
+mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I . tests/test_poisson_geometry.cpp -o "$check_dir/geometry"
+"$check_dir/geometry"
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I . tests/test_poisson_fgmres.cpp -o "$check_dir/fgmres"
 "$check_dir/fgmres"
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -DKASKADE_HAVE_MPI -I . \

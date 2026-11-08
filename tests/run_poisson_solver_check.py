@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 
 from run_poisson_quantization_diagnostic import compare, read_solution
 
@@ -26,6 +27,8 @@ def arguments(argv=None):
     p.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     p.add_argument('--executable', type=Path, help='Optional separately built executable')
     p.add_argument('--kaskade', type=Path, default=Path(os.environ.get('KASKADE7', '/kaskade7')))
+    p.add_argument('--vtk', type=int, choices=[0,1], default=0, help='Export the converged global solution.vtu for ParaView')
+    p.add_argument('--dimension', type=int, choices=[2,3], default=2)
     p.add_argument('--subres', type=int, default=4)
     p.add_argument('--elmres', type=int, default=8)
     p.add_argument('--sigma', type=float, default=1.)
@@ -38,8 +41,8 @@ def arguments(argv=None):
     p.add_argument('--iterations', type=int, default=1000)
     p.add_argument('--tolerance', type=float, default=1e-7)
     p.add_argument('--fgmres-restart', type=int, default=30)
-    p.add_argument('--check-routing', action='store_true')
-    p.add_argument('--check-local-bypass', action='store_true')
+    p.add_argument('--check-routing', action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument('--check-local-bypass', action=argparse.BooleanOptionalAction, default=False)
     p.add_argument('--launcher', default=os.environ.get('MPIEXEC','mpirun'))
     p.add_argument('--mpi-args', default='')
     p.add_argument('--slurm-container', type=Path)
@@ -93,8 +96,8 @@ exec "$@"
 def command(a, mode, folder):
     direct=mode['route']=='direct'; solver=mode['solver']; bits=mode['bits']
     before=mode['order'] in ('before','both'); after=mode['order'] in ('after','both')
-    payload=[str(a.executable),'--mpi','1','--threads','1','--vtk','0','--histogram','0','--timing','0',
-        '--subres',str(a.subres),'--elmres',str(a.elmres),'--sigma',str(a.sigma),
+    payload=[str(a.executable),'--mpi','1','--threads','1','--vtk',str(a.vtk),'--histogram','0','--timing','0',
+        '--dimension',str(a.dimension),'--subres',str(a.subres),'--elmres',str(a.elmres),'--sigma',str(a.sigma),
         '--crisscross','1','--interfacetypes','7','--iter',str(a.iterations),
         '--relativeTolerance',str(a.tolerance),'--verbose','0','--direct',str(int(direct)),
         '--useCg','1','--originalResidual','1','--flexibleCg',str(int(solver=='fcg' and not direct)),
@@ -143,8 +146,27 @@ def parse_run(text, folder, mode, a):
     status,solver,calls,rel=matches[0]; rel=float(rel)
     require(status=='converged' and math.isfinite(rel) and 0<=rel<=a.tolerance,'True residual/completion check failed')
     require(solver==('direct' if mode['route']=='direct' else mode['solver']),'Wrong solver')
+    require(re.findall(r'^Poisson geometry: dimension=(\d+) subdomains=(\d+)$',text,re.M)==
+            [(str(a.dimension),str(a.subres**a.dimension))], 'Wrong/missing spatial dimension or subdomain count')
     row=dict(iterations=int(calls),relative_residual=rel)
     solution=read_solution(folder/'solution.csv')
+    # Symmetric cuboid grids: corner nodes + cell centers (+ face centers in 3D).
+    axis=a.subres*a.elmres
+    expected=(axis+1)**a.dimension+axis**a.dimension
+    if a.dimension==3: expected+=3*axis*axis*(axis+1)
+    require(len(solution)==expected,'Unexpected global grid DOF count')
+    if a.vtk:
+        file=folder/'solution.vtu'
+        require(re.findall(r'^Poisson VTK file: (.*)$',text,re.M)==[str(file)], 'Missing VTK export marker')
+        document=ET.parse(file);piece=document.find('./UnstructuredGrid/Piece')
+        require(piece is not None and int(piece.get('NumberOfPoints'))==len(solution), 'Invalid VTK point count')
+        u=piece.find('./PointData/DataArray[@Name="u"]')
+        ids=piece.find('./PointData/DataArray[@Name="global_dof"]')
+        require(u is not None and ids is not None,'Missing VTK solution/DOF arrays')
+        require(list(map(float,(u.text or '').split()))==solution,'VTK and CSV solutions differ')
+        require(list(map(int,(ids.text or '').split()))==list(range(len(solution))), 'VTK global DOF numbering differs')
+        require(int(piece.get('NumberOfCells'))==(24 if a.dimension==3 else 4)*axis**a.dimension, 'Unexpected VTK cell count')
+        row['vtk_file']=str(file)
     if mode['route']=='direct': return row,solution
     with (folder/'convergence.csv').open() as stream: trace=list(csv.DictReader(stream))
     require(bool(trace) and int(trace[-1]['solver_calls'])==int(calls),'Trace iteration mismatch')
@@ -195,7 +217,7 @@ def main(argv=None):
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     root=(a.output or a.repo/'output'/f'poisson-solver-check-{stamp}-{os.getpid()}').resolve()
     root.mkdir(parents=True,exist_ok=False)
-    sources=[a.repo/name for name in ('bddc.cpp','poisson_bddc_options.hh','poisson_validation.hh','poisson_fgmres.hh','poisson_fgmres_mpi.hh')]
+    sources=[a.repo/name for name in ('bddc.cpp','poisson_bddc_options.hh','poisson_validation.hh','poisson_fgmres.hh','poisson_fgmres_mpi.hh','poisson_geometry.hh','poisson_vtk.hh')]
     sources += [Path(__file__).resolve()]+[a.kaskade/'mg'/name for name in ('bddc.hh','bddc.hpp','bddcMpi.hh','bddcMpiRouting.hh','bddcSpaceTransfer.hh','bddcSpaceTransfer.hpp')]
     fingerprint=digest(a.executable)
     manifest=dict(vars(a),executable_sha256=fingerprint,source_sha256={str(p):digest(p) for p in sources if p.is_file()},
@@ -270,7 +292,7 @@ def main(argv=None):
                         require(parity(root/peer,folder),'Combined/before solution or trace mismatch')
                         row['combined_parity']='EXACT_SOLUTION_AND_TRACE'
             row['status']='PASS';solutions[mode['name']]=x;completed[mode['name']]=row
-        except (ValueError,OSError,KeyError,subprocess.TimeoutExpired) as e:
+        except (ValueError,OSError,KeyError,ET.ParseError,subprocess.TimeoutExpired) as e:
             row['reason']=str(e)
         save();print('  '+row['status']+(': '+row['reason'] if row['status']=='FAIL' else ''),flush=True)
         if row['status']=='FAIL' and (mode['route']=='direct' or mode['bits'] is None):
