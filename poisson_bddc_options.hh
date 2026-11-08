@@ -35,6 +35,14 @@ struct PoissonBddcOptions
   int prolongateCompressionBits = -1;
   int restrictionPasses = 1;
   bool useCg = false;
+  bool flexibleCg = false;
+  bool originalResidual = false;
+  bool fgmres = false;
+  int fgmresRestart = 30;
+  bool constantSplit = false;
+  bool graphLiftingBothOrders = false;
+  bool mpiRouting = false;
+  bool localCompressionBypass = false;
   bool verbose = true;
   double relativeTolerance = 0;
   int compressionMinInterfaceSize = 0;
@@ -59,9 +67,36 @@ inline void validatePoissonOptions(PoissonBddcOptions const& options)
     throw std::invalid_argument("restrictionPasses must be 1..16; extra passes require --compression 1");
   if (!std::isfinite(options.relativeTolerance) || options.relativeTolerance<0)
     throw std::invalid_argument("relativeTolerance must be finite and nonnegative; 0 selects legacy stopping");
-  // Both orders use producer-owned plans and matching local reconstruction.
-  // If both switches are set, integer-after mode takes precedence for compatibility.
+  if ((options.flexibleCg && (!options.useCg || options.fgmres)) ||
+      (options.fgmres && (options.relativeTolerance<=0 || options.fgmresRestart<1)))
+    throw std::invalid_argument("FCG requires useCg; FGMRES requires positive relativeTolerance/restart and no FCG");
+  if (options.graphLiftingBothOrders &&
+      (!options.compression || !options.graphLifting || !options.graphLiftingAfterQuantization))
+    throw std::invalid_argument("Both orders require compression and both lifting flags");
+  if (options.constantSplit && (!options.compression || options.relativeTolerance<=0 ||
+      (!options.useCg && !options.fgmres) || options.restrictionPasses!=1))
+    throw std::invalid_argument("Constant splitting requires compressed CG/FCG/FGMRES, true residual stopping and one restriction pass");
+  if (options.mpiRouting && !options.mpi)
+    throw std::invalid_argument("Destination routing requires MPI");
+  if (options.localCompressionBypass && (!options.compression || !options.mpiRouting))
+    throw std::invalid_argument("Local compression bypass requires compressed destination routing");
 
+}
+
+// A fully local run uses the native raw solver instantiation, matching EMI.
+// Separate compressed/raw template instantiations can differ in rounding even
+// when every packet is raw. Preserve the selected Krylov recurrence.
+inline bool selectSingleNodePoissonBypass(PoissonBddcOptions& options, int nodes)
+{
+  if (!options.localCompressionBypass || nodes!=1) return false;
+  options.originalResidual = options.originalResidual || options.constantSplit || options.flexibleCg;
+  options.compression=false;
+  options.localCompressionBypass=false;
+  options.constantSplit=false;
+  options.graphLifting=false;
+  options.graphLiftingAfterQuantization=false;
+  options.graphLiftingBothOrders=false;
+  return true;
 }
 
 inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& options)
@@ -81,6 +116,8 @@ inline void configurePoissonTransfer(auto& transfer, PoissonBddcOptions const& o
                 })
   {
     transfer.setQuantizationBits(options.compressionBits);
+    transfer.setProlongateConstantSplit(options.constantSplit);
+    transfer.setTransformBeforeAndAfterQuantization(options.graphLiftingBothOrders);
     if (options.restrictCompressionBits!=-1)
       transfer.setRestrictQuantizationBits(options.restrictCompressionBits);
     if (options.prolongateCompressionBits!=-1)
@@ -336,6 +373,17 @@ auto constructPoissonSubdomains(std::vector<MatrixPointer> const& matrixPointers
 {
   Kaskade::BDDC::MpiDomainLayout layout;
   layout.configure(options.mpi,static_cast<int>(matrixPointers.size()));
+  std::vector<int> compressionNodes;
+  if (options.localCompressionBypass)
+  {
+    Kaskade::BDDC::MpiNodeTopology topology;
+    topology.configure();
+    for (std::size_t id=0; id<matrixPointers.size(); ++id)
+      compressionNodes.push_back(topology.leaders().at(layout.owner(id)));
+    if (poissonMpiRankZero(true))
+      std::cout << "BDDC local compression bypass: on; mixed-owner DOFs exact on all copies; nodes="
+                << topology.nodes() << '\n';
+  }
   Kaskade::BDDC::OwnedSubdomainStorage<Subdomain> storage(matrixPointers.size());
   for (size_t id = 0; id < matrixPointers.size(); ++id)
     if (layout.owns(static_cast<int>(id)))
@@ -349,6 +397,11 @@ auto constructPoissonSubdomains(std::vector<MatrixPointer> const& matrixPointers
         if (options.graphLifting || options.graphLiftingAfterQuantization)
           storage[id].transfer().setGraphLiftingFromMatrix(matrix);
       configurePoissonTransfer(storage[id].transfer(),options);
+      // Match the original-residual recurrence used by the EMI split/FCG experiments.
+      storage[id].setCgUseOriginalResidual(options.originalResidual || options.constantSplit || options.flexibleCg);
+      if constexpr (requires { storage[id].transfer().setNodeLocalCompressionBypass(compressionNodes); })
+        if (options.localCompressionBypass)
+          storage[id].transfer().setNodeLocalCompressionBypass(compressionNodes);
     }
   return storage;
 }

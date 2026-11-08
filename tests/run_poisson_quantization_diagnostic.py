@@ -51,8 +51,8 @@ def main():
     parser.add_argument('--iterations', type=int, default=300)
     parser.add_argument('--use-cg', type=int, choices=[0,1], default=1)
     parser.add_argument('--full-compression', action='store_true')
-    parser.add_argument('--transform-orders', nargs='+', choices=['before','after'],
-                        help='Matched full-codec comparisons; before=transform then quantize, after=quantize then integer lift')
+    parser.add_argument('--transform-orders', nargs='+', choices=['before','after','both'],
+                        help='Matched full-codec comparisons: before, after, or both transforms around quantization')
     parser.add_argument('--launcher', default=os.environ.get('MPIEXEC','mpirun'))
     parser.add_argument('--mpi-args', default='')
     parser.add_argument('--output', type=Path)
@@ -148,14 +148,15 @@ def main():
         folder.mkdir()
         passes = args.restriction_passes if bits is not None else 1
         coding = '1' if full or order else '0'
-        before = order=='before'
+        before = order in ('before','both')
         command = launcher+['-np',str(1 if direct else args.ranks)]+common+[
             '--direct',str(int(direct)),'--compression',str(int(bits is not None)),
             '--compressionBits',str(bits if bits is not None else 32),
             '--restrictCompressionBits',str(bits if bits is not None else 32),
             '--prolongateCompressionBits',str(bits if bits is not None else 32),
             '--restrictionPasses',str(passes),'--graphLifting',str(int(before)),
-            '--graphLiftingAfterQuantization','0' if before else coding,'--huffman',coding,
+            '--graphLiftingBothOrders',str(int(order=='both')),
+            '--graphLiftingAfterQuantization','0' if order=='before' else coding,'--huffman',coding,
             '--bitlength',coding,'--zigzag',coding,'--prefix',str(folder)]
         (folder/'command.sh').write_text(shlex.join(command)+'\n')
         print('Running '+name+' ...',flush=True)
@@ -176,7 +177,7 @@ def main():
         text = (folder/'run.log').read_text(errors='replace')
         try:
             if order:
-                expected_order='transform-first' if before else 'quantize-first'
+                expected_order='both' if order=='both' else 'transform-first' if before else 'quantize-first'
                 if re.findall(r'^Poisson compression order: (.*)$',text,re.M)!=[expected_order]:
                     raise ValueError('Missing/wrong compression order marker; rebuild the executable')
             matches = re.findall(r'Poisson result: status=(\S+) solver=(\S+) calls=(\d+)(?: accepted_updates=\d+)? rel=(\S+)',text)

@@ -1,5 +1,9 @@
 # Poisson BDDC scratch example
 
+For the current geometric `bddc` solver matrix and cluster commands, see
+[Current solver, transform-order and MPI validation](#current-solver-transform-order-and-mpi-validation).
+The dated audit below records the earlier implementation.
+
 ## Compression audit and validation (31 October 2026)
 
 The old `bddc` and `bddc-add` used `uint16_t` quantization symbols: requests above
@@ -42,11 +46,12 @@ from accepted updates, and `solution.csv` stores full-precision global values.
 
 The validated full pipeline uses reversible integer graph lifting **after**
 quantization (`--graphLifting 0 --graphLiftingAfterQuantization 1`), now the
-default transform configuration. Pre-quantization lifting is rejected when
-compression is enabled without integer-after mode: its neighbor-wise transformed
-reconstruction does not match the nodal published-residual feedback. To disable
-transforms, set both options to zero. In the shell runners, `LIFTING_MODE=1` is
-the new default, `0` disables lifting, and legacy `2` is rejected by the solver.
+default transform configuration. At the time of this audit, pre-quantization
+lifting was rejected because its neighbor-wise reconstruction did not match nodal
+published-residual feedback. That restriction has since been removed after the
+producer-owned reconstruction fix; the current campaign tests `before`, `after`
+and `both` explicitly. To disable transforms, set both lifting options to zero.
+Use the current runner below for matched transform-order comparisons.
 
 Inside the same OpenMPI container as EMI, rebuild without deleting result files:
 
@@ -277,7 +282,7 @@ These options are available in both Poisson executables.
 | `--restrictionPasses` | `1` | Restriction exchanges per compressed solver update, 1..16 |
 | `--compressionMinInterfaceSize` | `0` | Minimum scalar interface size for Huffman coding; `0` encodes all interfaces |
 | `--compressionThresholdInterfaceTypes` | `4` | Interface type receiving the size threshold: `2=edge`, `4=face`, `0=all` |
-| `--graphLifting` | `0` | Legacy pre-quantization transform; rejected without integer-after mode |
+| `--graphLifting` | `0` | Floating graph lifting before quantization; set integer-after mode to `0` |
 | `--graphLiftingAfterQuantization` | `1` | Apply reversible integer graph lifting after quantization |
 | `--huffman` | `1` | Enable Huffman coding |
 | `--bitlength` | `1` | Enable bit-length/tail encoding |
@@ -520,3 +525,172 @@ mpirun --allow-run-as-root -np 2 ./bddc \
 For fair comparisons, keep `--subres`, `--elmres`, `--iter`, `--tol`,
 `--threads`, and the grid configuration fixed while changing only `--mpi`,
 `--compression`, and the compression settings.
+
+## Current solver, transform-order and MPI validation
+
+`tests/run_poisson_solver_check.py` targets the geometric `bddc` executable. The
+new solver/routing CLI options are not added to the separate algebraic `bddc-add`
+driver. The campaign validates the stationary Poisson problem with
+CG, one-term FCG and restarted right-preconditioned FGMRES. It exposes the latest
+Kaskade destination routing and same-node compression bypass. Existing defaults
+and the older frozen-buffer workflow are retained. No EMI time-integration or
+physical-step histogram schedule is implied for this stationary example.
+
+The new campaign explicitly uses original-residual CG rho in **all** controls
+and compressed cases (`--originalResidual 1`); compare its own controls, not the
+iteration count of an older run with different recurrence settings. Constant
+splitting (`--constantSplit 1`) is an opt-in prolongation experiment; it does not
+prove that a lossy preconditioner is SPD. FCG and FGMRES also require measured
+convergence. Split and local-bypass campaigns keep histograms disabled.
+
+Transform orders are:
+
+| Order | Pipeline |
+|---|---|
+| `before` | Floating graph lifting → quantization → full coding |
+| `after` | Quantization → reversible integer graph lifting → full coding |
+| `both` | Floating graph lifting → quantization → reversible integer lifting → full coding |
+
+Full coding includes zigzag, bit-length/tail coding and Huffman. `both` explicitly
+sets `--graphLiftingBothOrders 1`; merely enabling the two older switches retains
+their existing precedence. When both runs are present, the campaign requires
+identical exported solutions and convergence traces for `before` and `both`.
+
+The FGMRES kernel and root-owned MPI adapter were ported from the validated EMI
+implementation at commit `a850a1f`. Arnoldi vectors are broadcast, local BDDC
+corrections are reduced, and the exact assembled operator is applied on rank zero.
+The preconditioner uses local matrix-diagonal partition-of-unity weights on input
+and output. This is a **validation implementation**, not a scalable distributed
+Krylov implementation. Its outer-solver logical communication is reported
+separately from BDDC interface bytes. Final errors use an independent distributed
+assembly of the true residual. FGMRES stores a global iterate; its zero interface
+jump describes that global representation, not a separate audit of every
+preconditioner intermediate.
+
+### Build on ZIB
+
+From `poisson_new_scratch`, inside an active Slurm allocation:
+
+```bash
+poisson_sif=/data/numerik/people/fchegini/containers/kaskade-robin-20261105/kaskade7-robin.sif
+poisson_kaskade=/data/numerik/people/fchegini/kaskade7_new
+
+srun --mpi=none --nodes=1 --ntasks=1 --ntasks-per-node=1 \
+  apptainer exec --cleanenv \
+  --bind "$poisson_kaskade:/kaskade7" \
+  --bind "$(dirname "$PWD"):/BDDC" \
+  --pwd /BDDC/poisson_new_scratch "$poisson_sif" \
+  /bin/bash tests/build_poisson_cluster.sh
+```
+
+The build preserves dependency files, forces compilation of the application, and
+runs the transfer, residual, FGMRES and Python tests. Build once before submitting
+campaigns; do not replace the executable while any campaign is running.
+
+### Local MPI validation inside the existing Open MPI container
+
+```bash
+python3 tests/run_poisson_solver_check.py \
+  --ranks 2 --expected-nodes 1 --subres 4 --elmres 8 \
+  --bits 16 --solvers cg fcg fgmres --split both \
+  --transform-orders before after both \
+  --check-routing --check-local-bypass \
+  --mpi-args=--allow-run-as-root
+```
+
+This runs 61 cases: one direct reference, six uncompressed controls, and 54
+compressed cases. Single-node bypass must match the same solver's uncompressed
+solution and convergence trace exactly. Destination and legacy routing must also
+match exactly, including logical bytes. A failed baseline stops the campaign;
+failed compressed cases are recorded and the remaining experiments continue.
+
+For the earlier mesh and additional precisions, use `--subres 4 --elmres 64
+--bits 8 12 16 24`. Low-bit failures are experimental outcomes, not silently relaxed
+acceptance criteria. Use `--plan-only` to inspect the cases before running them.
+
+### Two, four or eight nodes
+
+Submit from the Poisson repository root after the build; `output` must exist for
+Slurm's log file. Each layout uses two MPI ranks per node:
+
+```bash
+mkdir -p output
+sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  tests/submit_poisson_solver_check.sbatch --subres 4 --elmres 64
+sbatch --nodes=4 --ntasks=8 --ntasks-per-node=2 \
+  tests/submit_poisson_solver_check.sbatch --subres 4 --elmres 64
+sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 \
+  tests/submit_poisson_solver_check.sbatch --subres 4 --elmres 64
+```
+
+Defaults test 16-bit transform-first with split disabled, all three solvers, legacy
+versus destination routing, and local bypass. Add `--split both --transform-orders
+before after both --bits 12 16` to expand the matrix and request more wall time if
+needed. The runner checks actual MPI shared-memory topology, requires inter-node
+R/P traffic on multi-node layouts, and bounds each solve (`--timeout 600`).
+The script uses `self,vader,tcp` with Vader single-copy disabled, preserving the
+configuration that completed the EMI cluster checks. Same-node MPI remains active;
+bypass avoids compression, not MPI or all global collectives. Any DOF with owners
+sharing a node remains exact on all copies, including remote copies. Therefore
+local bypass can change inter-node bytes and the numerical trajectory.
+
+Every output directory contains commands, source/executable hashes, per-case logs,
+`summary.json`, `summary.csv`, and `summary.md`. They report iterations, true residuals, raw
+relative Euclidean solution errors against direct and matched uncompressed solves,
+solver-wrapper/launcher times, and logical same-rank/same-node/inter-node bytes.
+These are coefficient norms, not mass-matrix or fractional Sobolev norms.
+`PASS` checks completion, residuals and applicable parity; **no scientific
+solution-error threshold is imposed**. Multi-node bypass differences are measured,
+not required to equal the fully compressed trajectory.
+
+Byte savings use the same solver's uncompressed baseline, including its actual
+iteration count. They exclude MPI framing, coarse/setup communication, codebook
+training and validation collectives; FGMRES outer communication is separate.
+Solver-wrapper time includes setup and validation/output. Application time is
+launcher wall time. These checks do not establish a runtime speedup; performance
+claims need repeated measurements under matched output and validation settings.
+
+Poisson uses a `1e8` Dirichlet penalty on the outer boundary. In the first real
+16-bit, `subres=4`, `elmres=8` split sweep, CG broke down/stalled and FCG broke down
+for transform-first/combined splitting, while FGMRES converged. These are recorded
+numerical outcomes; splitting is therefore **off by default** in the Poisson
+campaign. The interaction of large diagonal weights with the constant split is a
+possible explanation, not a verified root cause. Use `--split both` to investigate;
+no tolerance or breakdown test is relaxed. An all-local bypass selects the native
+uncompressed solver instantiation (as in EMI), preserving bitwise raw parity.
+
+### Validation performed on 8 November 2026
+
+Tests used an isolated source/executable snapshot on `lxdesk-010399`, the existing
+`localhost/kaskade7-robin-cluster:20261105` image, and two Open MPI ranks on one
+physical node. The working directory's existing binaries were not replaced.
+
+- `subres=4`, `elmres=64`, 12/24 bits, CG/FCG/FGMRES, before/after/both, split off:
+  **61/61 cases passed**, including direct/raw controls, legacy/destination parity,
+  exact single-node bypass parity and combined/before parity. All iterative cases
+  used 10 updates. Fully coded logical payload savings were about 71.3–73.1% at
+  12 bits and 53.2–58.1% at 24 bits. FGMRES outer traffic is excluded from these
+  interface-payload percentages.
+- `subres=4`, `elmres=8`, 16 bits, split off/on with the same full matrix:
+  **51/61 cases passed**. Ten failures are five split configurations under both
+  routes: CG before/after/both and FCG before/both. CG after reached 1,000 updates;
+  the other four broke down. All 18 local-bypass cases matched raw controls
+  exactly. FGMRES split cases converged but required 33–50 updates versus six
+  without splitting; splitting is not recommended as this campaign's default.
+- Six Python tests cover mode validation, reference failures, matrix construction,
+  topology/rank/counter rejection and frozen observer checks. Standalone C++ tests
+  cover residual assembly, FGMRES numerical failure handling and MPI accounting.
+- The existing direct/CG/quantization/capture/before/after/both workflow passed
+  **7/7 cases**, including real production frozen packet replay and observer parity.
+  The Open MPI adapter test passed on two ranks, including failure synchronization.
+  Both `bddc` and `bddc-add` compiled with the current shared options header;
+  `bddc-add` was a build-compatibility check, not a new solver-matrix run.
+
+The detailed runs are under
+`output/poisson-upgrade-validation-20261108.trb7Np/validation-mesh64` and
+`output/poisson-upgrade-validation-20261108.trb7Np/validation-small`; the older
+workflow regression is in the same snapshot under `validation-regression`.
+These are single-node correctness results, not multi-node Poisson validation or
+repeated performance measurements. The two/four/eight-node batch commands above
+are the next validation stage. Solution errors remain reported quantities with
+no imposed scientific acceptance threshold.

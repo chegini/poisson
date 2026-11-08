@@ -24,6 +24,7 @@ using namespace Kaskade;
 
 #include "mg/bddc.hpp"
 #include "poisson_bddc_options.hh"
+#include "poisson_fgmres_mpi.hh"
 
 // ------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------
@@ -347,6 +348,14 @@ int main(int argc, char** argv)
   ("prolongateCompressionBits", bddcOptions.prolongateCompressionBits, -1, "prolongation bits: -1=inherit, 1..32=override")
   ("restrictionPasses", bddcOptions.restrictionPasses, 1, "restriction exchanges per update, 1..16")
   ("useCg", bddcOptions.useCg, false, "use CG instead of legacy steepest descent")
+  ("originalResidual", bddcOptions.originalResidual, false, "use original residual for CG rho; matched controls for split experiments")
+  ("flexibleCg", bddcOptions.flexibleCg, false, "one-term flexible CG; requires useCg")
+  ("fgmres", bddcOptions.fgmres, false, "root-owned flexible GMRES validation adapter")
+  ("fgmresRestart", bddcOptions.fgmresRestart, 30, "FGMRES restart length")
+  ("constantSplit", bddcOptions.constantSplit, false, "experimental weighted constant splitting in prolongation")
+  ("graphLiftingBothOrders", bddcOptions.graphLiftingBothOrders, false, "explicit floating-before plus reversible-integer-after lifting")
+  ("mpiRouting", bddcOptions.mpiRouting, false, "route MPI interface packets only to their destination")
+  ("localCompressionBypass", bddcOptions.localCompressionBypass, false, "keep same-node/mixed-owner DOFs exact on all copies")
   ("verbose", bddcOptions.verbose, true, "print internal iteration table")
   ("relativeTolerance", bddcOptions.relativeTolerance, 0.0, "true global relative residual target; 0=legacy --tol")
   ("direct", direct, false, "solve assembled global problem with UMFPACK for validation")
@@ -369,15 +378,28 @@ int main(int argc, char** argv)
     throw std::invalid_argument("--direct requires --relativeTolerance > 0");
   if (bddcOptions.mpi && vtk)
     throw std::runtime_error("--vtk 1 is not supported with --mpi 1; use --vtk 0");
+  if ((bddcOptions.fgmres && vtk) ||
+      (histogram && (bddcOptions.localCompressionBypass || bddcOptions.fgmres || bddcOptions.constantSplit)))
+    throw std::invalid_argument("FGMRES requires vtk=0; bypass/FGMRES/split validation requires histogram=0");
   PoissonMpiSession mpiSession(argc,argv,bddcOptions.mpi);
   if (poissonMpiRankZero(bddcOptions.mpi))
     std::cout << "Poisson compression order: "
               << (!bddcOptions.compression ? "uncompressed" :
+                  bddcOptions.graphLiftingBothOrders ? "both" :
                   bddcOptions.graphLiftingAfterQuantization && bddcOptions.huffman
                     ? "quantize-first" : bddcOptions.graphLifting &&
                        !bddcOptions.graphLiftingAfterQuantization
                     ? "transform-first" : "quantization-only") << '\n';
 
+
+  if (bddcOptions.localCompressionBypass)
+  {
+    MpiNodeTopology topology;
+    topology.configure();
+    if (selectSingleNodePoissonBypass(bddcOptions,topology.nodes()) && poissonMpiRankZero(true))
+      std::cout << "BDDC local compression bypass: on; mixed-owner DOFs exact on all copies; nodes=1\n"
+                << "Poisson local bypass backend: native uncompressed solver\n";
+  }
 
   if (threads >= 0)
     NumaThreadPool::instance(threads);
@@ -504,6 +526,9 @@ int main(int argc, char** argv)
     BDDCSolver<BddcSubdomain,decltype(subs)> bddcSolver(subs,ifa.coarseConstraints(),
       activeIds,bddcOptions.useCg,bddcOptions.verbose,bddcOptions.mpi);
     bddcSolver.setRestrictionPasses(bddcOptions.restrictionPasses);
+    bddcSolver.setFlexibleCg(bddcOptions.flexibleCg);
+    bddcSolver.setMpiDestinationRouting(bddcOptions.mpiRouting);
+    PoissonBddc::OuterSolverTraffic outerTraffic;
     timer.stop("bddc creation");
     if (histogram && poissonMpiRankZero(bddcOptions.mpi))
       std::filesystem::create_directories(prefix);
@@ -516,7 +541,8 @@ int main(int argc, char** argv)
     int accepted=0;
     if (monitor)
     {
-      sample=monitor->evaluate(subs);
+      sample=bddcOptions.fgmres ? monitor->evaluateGlobal(std::vector<double>(monitor->globalRhs().size(),0))
+                                 : monitor->evaluate(subs);
       runConverged=sample.converged(bddcOptions.relativeTolerance);
       printPoissonResidual(sample,0,bddcOptions.mpi);
       if (poissonMpiRankZero(bddcOptions.mpi))
@@ -530,7 +556,78 @@ int main(int argc, char** argv)
                 << sample.relative << ',' << sample.relativeJump << '\n';
       }
     }
-    for (int k=0; k<iter && !runConverged; ++k)
+    if (bddcOptions.fgmres)
+    {
+      // Replicated local matrices permit a root-only exact assembled matvec.
+      // Partition a global Krylov vector with diagonal weights summing to one;
+      // assemble the local preconditioned corrections using the same weights.
+      auto const size=monitor->globalRhs().size();
+      std::vector<double> diagonal(size,0);
+      for (int i=0; i<N; ++i)
+        for (std::size_t j=0; j<mapping[i].size(); ++j)
+          diagonal[mapping[i][j]]+=(*matrices[i])[j][j][0][0];
+      std::vector<Vector> weights(N), rhs(N), correction;
+      for (int i=0; i<N; ++i)
+      {
+        weights[i].resize(mapping[i].size()); rhs[i].resize(mapping[i].size());
+        for (std::size_t j=0; j<mapping[i].size(); ++j)
+        {
+          double d=diagonal[mapping[i][j]];
+          if (!(d>0) || !std::isfinite(d)) throw std::runtime_error("Invalid Poisson diagonal weight");
+          weights[i][j][0]=(*matrices[i])[j][j][0][0]/d;
+        }
+      }
+      auto applyA=[&](std::vector<double> const& x)
+      {
+        std::vector<double> ax(size,0);
+        for (int i=0; i<N; ++i)
+        {
+          Vector local(mapping[i].size()), product(mapping[i].size());
+          for (std::size_t j=0; j<mapping[i].size(); ++j) local[j][0]=x[mapping[i][j]];
+          matrices[i]->mv(local,product);
+          for (std::size_t j=0; j<mapping[i].size(); ++j) ax[mapping[i][j]]+=product[j][0];
+        }
+        return ax;
+      };
+      auto applyM=[&](std::vector<double> const& v)
+      {
+        for (int i=0; i<N; ++i)
+          for (std::size_t j=0; j<mapping[i].size(); ++j)
+            rhs[i][j][0]=weights[i][j][0]*v[mapping[i][j]];
+        bddcSolver.applyPreconditioner(rhs,correction);
+        std::vector<double> local(size,0);
+        for (int i=0; i<N; ++i)
+          if (subs.has(i))
+            for (std::size_t j=0; j<mapping[i].size(); ++j)
+              local[mapping[i][j]]+=weights[i][j][0]*correction[i][j][0];
+        return local;
+      };
+      auto result=PoissonBddc::rootFgmres(monitor->globalRhs(),bddcOptions.mpi,
+        bddcOptions.fgmresRestart,iter,bddcOptions.relativeTolerance,applyA,applyM,
+        [&](int call,int,double,double residual)
+        {
+          if (call && history.is_open())
+            history << call << ',' << call << ',' << residual << ',' << sample.rhsNorm << ','
+                    << (sample.rhsNorm>0 ? residual/sample.rhsNorm : residual) << ",0\n";
+        },outerTraffic);
+      sample=monitor->evaluateGlobal(result.x);
+      accepted=result.iterations;
+      resNorm.assign(result.iterations,result.residual);
+      runConverged=result.status==PoissonBddc::Fgmres::Status::converged &&
+                   sample.converged(bddcOptions.relativeTolerance);
+      solverStopped=result.status==PoissonBddc::Fgmres::Status::breakdown ||
+                    result.status==PoissonBddc::Fgmres::Status::nonfinite;
+      // Last history row uses the independently assembled distributed residual.
+      if (history.is_open())
+        history << accepted << ',' << accepted << ',' << sample.absolute << ',' << sample.rhsNorm
+                << ',' << sample.relative << ',' << sample.relativeJump << '\n';
+      printPoissonResidual(sample,accepted,bddcOptions.mpi);
+      if (poissonMpiRankZero(bddcOptions.mpi))
+        std::cout << "Poisson FGMRES: root-owned validation adapter; restart=" << bddcOptions.fgmresRestart
+                  << " cycles=" << result.cycles << " matvecs=" << result.matvecs
+                  << " basis_bytes=" << result.peakBasisBytes << '\n';
+    }
+    for (int k=0; !bddcOptions.fgmres && k<iter && !runConverged; ++k)
     {
       timer.start("BDDC solve");
       resNorm.push_back(bddcSolver.solve());
@@ -582,7 +679,7 @@ int main(int argc, char** argv)
     }
     if (poissonMpiRankZero(bddcOptions.mpi))
     {
-      if (!solverStopped && resNorm.size() >= 2)
+      if (!bddcOptions.fgmres && !solverStopped && resNorm.size() >= 2)
       {
         int lookback = std::min(10,static_cast<int>(resNorm.size())-1);
         double older = resNorm[resNorm.size()-lookback-1];
@@ -596,6 +693,10 @@ int main(int argc, char** argv)
       if (nIter > 0)
         std::cout << "average amount of data exchanged per iteration: init=" << iB/(nIter*1024.0) << "kb restriction=" << rB/(nIter*1024.0) << "kb prolongation=" << pB/(nIter*1024.0) << "kb coarseGrid=" << cB/(nIter*1024.0) << "kb\n";
     }
+    if (bddcOptions.mpiRouting) bddcSolver.routingTraffic().printGlobal();
+    if (poissonMpiRankZero(bddcOptions.mpi))
+      std::cout << "Poisson outer solver logical payload bytes: " << outerTraffic.bytes
+                << " collectives=" << outerTraffic.collectives << '\n';
     if (bddcOptions.compression)
       printPoissonCompressionReport(bddcSolver.compressionTraffic(),bddcOptions.mpi);
     else
@@ -605,9 +706,9 @@ int main(int argc, char** argv)
       std::chrono::steady_clock::now()-started).count(),bddcOptions.mpi);
     if (poissonMpiRankZero(bddcOptions.mpi))
       std::cout << "Poisson result: status="
-                << (runConverged ? "converged" : bddcSolver.stopped() ?
+                << (runConverged ? "converged" : solverStopped ?
                     (bddcSolver.stagnated() ? "stagnation" : "breakdown") : "iteration-limit")
-                << " solver=" << (bddcOptions.useCg ? "cg" : "sd")
+                << " solver=" << (bddcOptions.fgmres ? "fgmres" : bddcOptions.flexibleCg ? "fcg" : bddcOptions.useCg ? "cg" : "sd")
                 << " calls=" << resNorm.size() << " accepted_updates=" << accepted
                 << " rel=" << (monitor ? sample.relative : std::numeric_limits<double>::quiet_NaN())
                 << "\nPoisson solver wall seconds: " << seconds << '\n';
