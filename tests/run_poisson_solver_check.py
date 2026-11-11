@@ -37,7 +37,8 @@ def arguments(argv=None):
     p.add_argument('--bits', type=int, nargs='+', default=[16])
     p.add_argument('--solvers', nargs='+', choices=['cg','fcg','fgmres'], default=['cg','fcg','fgmres'])
     p.add_argument('--split', choices=['off','on','both'], default='off')
-    p.add_argument('--transform-orders', nargs='+', choices=['before','after','both'], default=['before'])
+    p.add_argument('--transform-orders', nargs='+', choices=['before','after','both','quantization-only'], default=['before'],
+                   help='quantization-only disables lifting and entropy coding; splitting is controlled separately')
     p.add_argument('--iterations', type=int, default=1000)
     p.add_argument('--tolerance', type=float, default=1e-7)
     p.add_argument('--fgmres-restart', type=int, default=30)
@@ -96,6 +97,7 @@ exec "$@"
 def command(a, mode, folder):
     direct=mode['route']=='direct'; solver=mode['solver']; bits=mode['bits']
     before=mode['order'] in ('before','both'); after=mode['order'] in ('after','both')
+    entropy = mode['order'] != 'quantization-only'
     payload=[str(a.executable),'--mpi','1','--threads','1','--vtk',str(a.vtk),'--histogram','0','--timing','0',
         '--dimension',str(a.dimension),'--subres',str(a.subres),'--elmres',str(a.elmres),'--sigma',str(a.sigma),
         '--crisscross','1','--interfacetypes','7','--iter',str(a.iterations),
@@ -106,7 +108,7 @@ def command(a, mode, folder):
         '--constantSplit',str(int(mode['split'])), '--restrictionPasses','1',
         '--graphLifting',str(int(before)), '--graphLiftingAfterQuantization',str(int(after)),
         '--graphLiftingBothOrders',str(int(mode['order']=='both')),
-        '--huffman','1','--bitlength','1','--zigzag','1','--bddcExcludeCornersFromCompression','1',
+        '--huffman',str(int(entropy)),'--bitlength',str(int(entropy)),'--zigzag',str(int(entropy)),'--bddcExcludeCornersFromCompression','1',
         '--mpiRouting',str(int(mode['route'] in ('destination','local-bypass'))),
         '--localCompressionBypass',str(int(mode['route']=='local-bypass')),'--prefix',str(folder)]
     ranks,nodes=(1,1) if direct else (a.ranks,a.expected_nodes)
@@ -181,7 +183,7 @@ def parse_run(text, folder, mode, a):
     outer=re.findall(r'^Poisson outer solver logical payload bytes: (\d+) collectives=(\d+)$',text,re.M)
     require(len(outer)==1,'Missing outer solver traffic')
     row['outer_solver_bytes']=int(outer[0][0])
-    expected='uncompressed' if mode['bits'] is None else {'before':'transform-first','after':'quantize-first','both':'both'}[mode['order']]
+    expected='uncompressed' if mode['bits'] is None else {'before':'transform-first','after':'quantize-first','both':'both','quantization-only':'quantization-only'}[mode['order']]
     require(re.findall(r'^Poisson compression order: (.*)$',text,re.M)==[expected],'Wrong transform order')
     if mode['route']=='local-bypass':
         require(re.findall(r'^BDDC local compression bypass: on; mixed-owner DOFs exact on all copies; nodes=(\d+)$',text,re.M)==[str(a.expected_nodes)],

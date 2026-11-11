@@ -43,6 +43,27 @@ class SolverCampaign(unittest.TestCase):
         cmd=check.command(a,modes[-1],Path('/tmp/three-dimensional'))
         self.assertEqual(cmd[cmd.index('--dimension')+1],'3')
 
+    def test_quantization_only_fcg_split(self):
+        a=check.arguments(['--dimension','2','--subres','16','--elmres','32',
+            '--bits',*[str(b) for b in range(4,25)],'--solvers','fcg',
+            '--split','on','--transform-orders','quantization-only',
+            '--ranks','16','--expected-nodes','8',
+            '--no-check-routing','--no-check-local-bypass'])
+        modes=check.plan(a)
+        self.assertEqual(len(modes),23)
+        self.assertEqual(modes[1]['name'],'fcg-uncompressed-destination')
+        for mode in modes[2:]:
+            self.assertIn('quantization-only',mode['name'])
+            cmd=check.command(a,mode,Path('/tmp/quantization-only'))
+            def value(flag): return cmd[cmd.index(flag)+1]
+            for flag in ['--graphLifting','--graphLiftingAfterQuantization',
+                         '--graphLiftingBothOrders','--huffman','--bitlength','--zigzag',
+                         '--localCompressionBypass']:
+                self.assertEqual(value(flag),'0')
+            for flag in ['--compression','--constantSplit','--flexibleCg','--mpiRouting']:
+                self.assertEqual(value(flag),'1')
+            self.assertEqual(value('--compressionBits'),str(mode['bits']))
+
     def test_fcg_vtk_plan(self):
         a=check.arguments(['--dimension','3','--subres','2','--elmres','4','--bits','12',
             '--solvers','fcg','--transform-orders','before','--vtk','1',
@@ -99,7 +120,7 @@ if not direct:
   for p in ('restrict','prolongate'):
    for r,b in [('same-rank',0),('same-node',size//2),('inter-node',0)]:
     print(f'BDDC routed payload: phase={p} route={r} bytes={b} packets={int(b>0)}')
-order='uncompressed' if not compressed else 'both' if v('--graphLiftingBothOrders')=='1' else 'transform-first' if v('--graphLifting')=='1' else 'quantize-first'
+order='uncompressed' if not compressed else 'both' if v('--graphLiftingBothOrders')=='1' else 'transform-first' if v('--graphLifting')=='1' else 'quantize-first' if v('--graphLiftingAfterQuantization')=='1' else 'quantization-only'
 print('Poisson compression order:',order)
 print(f"Poisson geometry: dimension={os.environ.get('BAD_DIMENSION',v('--dimension'))} subdomains={int(v('--subres'))**int(v('--dimension'))}")
 print(f'Poisson result: status=converged solver={solver} calls={calls} rel={rel}')
@@ -113,6 +134,13 @@ print(f'Poisson result: status=converged solver={solver} calls={calls} rel={rel}
             self.assertTrue(all(r['status']=='PASS' for r in rows))
             self.assertTrue(any(r.get('combined_parity') for r in rows))
             self.assertTrue(all(r['net_saved_percent']==50 for r in rows if r['configuration']['bits'] and r['configuration']['route']!='local-bypass'))
+            result=subprocess.run(command+['--transform-orders','quantization-only',
+                '--solvers','fcg','--split','on','--no-check-routing','--no-check-local-bypass',
+                '--output',str(root/'quant')],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            quant_rows=json.loads((root/'quant/summary.json').read_text())
+            self.assertEqual(len(quant_rows),3)
+            self.assertTrue(all(r['status']=='PASS' for r in quant_rows))
             result=subprocess.run(command+['--output',str(root/'bad')],env=dict(os.environ,BAD_REFERENCE='1'),capture_output=True,text=True)
             self.assertEqual(result.returncode,1,result.stdout+result.stderr)
             rows=json.loads((root/'bad/summary.json').read_text());self.assertEqual(len(rows),2)
